@@ -1,1 +1,266 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
 
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>Knife Battle LIVE</title>
+
+    <link
+        rel="stylesheet"
+        href="style.css"
+    >
+
+    <script
+        src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"
+    ></script>
+
+</head>
+
+<body>
+
+<div id="app">
+
+
+    <!-- ========================================= -->
+    <!-- ARENA -->
+    <!-- ========================================= -->
+
+    <div id="game-container"></div>
+
+
+    <!-- ========================================= -->
+    <!-- PAINEL -->
+    <!-- ========================================= -->
+
+    <aside id="panel">
+
+        <h2>
+            🎁 Simulador LIVE
+        </h2>
+
+        <div class="subtitle">
+            Simule espectadores e presentes.
+        </div>
+
+
+        <!-- NOME -->
+
+        <label for="username">
+            Nome do espectador
+        </label>
+
+        <input
+            id="username"
+            type="text"
+            placeholder="Ex: João"
+            autocomplete="off"
+        >
+
+
+        <!-- ID -->
+
+        <label for="userid">
+            ID do espectador
+        </label>
+
+        <input
+            id="userid"
+            type="text"
+            placeholder="Ex: 849321"
+            autocomplete="off"
+        >
+
+
+        <!-- AVATAR -->
+
+        <label for="avatar">
+            Avatar de teste
+        </label>
+
+        <input
+            id="avatar"
+            type="text"
+            value="😎"
+            maxlength="2"
+        >
+
+
+        <!-- PREVIEW -->
+
+        <div
+            id="player-preview"
+            class="player-preview"
+        >
+
+            <div class="preview-row">
+
+                <span>
+                    🪙 Moedas
+                </span>
+
+                <strong id="preview-coins">
+                    0
+                </strong>
+
+            </div>
+
+
+            <div class="preview-row">
+
+                <span>
+                    🔪 Facas
+                </span>
+
+                <strong id="preview-knives">
+                    0
+                </strong>
+
+            </div>
+
+
+            <div class="preview-row">
+
+                <span>
+                    💀 Kills
+                </span>
+
+                <strong id="preview-kills">
+                    0
+                </strong>
+
+            </div>
+
+        </div>
+
+
+        <!-- STATUS -->
+
+        <div id="selected-status">
+            Digite nome e ID.
+        </div>
+
+
+        <!-- PRESENTES -->
+
+        <div class="button-grid">
+
+            <button
+                class="coins-button"
+                onclick="sendCoins(10)"
+            >
+                🪙 +10
+            </button>
+
+
+            <button
+                class="coins-button"
+                onclick="sendCoins(50)"
+            >
+                🪙 +50
+            </button>
+
+
+            <button
+                class="coins-button"
+                onclick="sendCoins(100)"
+            >
+                🪙 +100
+            </button>
+
+
+            <button
+                class="coins-button"
+                onclick="sendCoins(500)"
+            >
+                🪙 +500
+            </button>
+
+
+            <button
+                class="coins-button"
+                onclick="sendCoins(1000)"
+            >
+                🪙 +1000
+            </button>
+
+
+            <button
+                class="heart-button"
+                onclick="sendHeart()"
+            >
+                ❤️ Heart-Me
+            </button>
+
+        </div>
+
+
+        <!-- NOVA RODADA -->
+
+        <button
+            id="new-round-button"
+            class="new-round-button"
+            onclick="startNewRound()"
+            disabled
+        >
+            ▶️ Nova rodada
+        </button>
+
+
+        <!-- INFORMAÇÕES -->
+
+        <div class="round-info">
+
+            <div>
+                🏁 Rodada:
+                <strong id="panel-round">
+                    1
+                </strong>
+            </div>
+
+
+            <div>
+                👥 Participantes:
+                <strong id="panel-participants">
+                    0
+                </strong>
+            </div>
+
+
+            <div>
+                ⏳ Entrando:
+                <strong id="panel-waiting">
+                    0
+                </strong>
+            </div>
+
+        </div>
+
+
+        <!-- LISTA -->
+
+        <div class="section-title">
+            👥 Jogadores
+        </div>
+
+
+        <div id="players-list">
+            Nenhum jogador ainda.
+        </div>
+
+    </aside>
+
+</div>
+
+
+<script src="game.js"></script>
+
+</body>
+
+</html>
