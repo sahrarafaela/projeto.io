@@ -1,184 +1,143 @@
-// ======================================================
+// ============================================================
 // KNIFE BATTLE LIVE
-// ======================================================
-//
-// REGRAS
+// ============================================================
+// Regras:
 //
 // 10 moedas = 1 faca
-// Rodada = 5 minutos
-// Entrada = 10 moedas OU Heart-Me
-// Identidade = userId
-//
-// Novo jogador:
-// - spawn seguro
-// - 7 segundos de proteção
+// Novo jogador entra imediatamente ao receber moedas
+// Heart-Me também entra imediatamente
 //
 // Combate:
-// - HP alto
-// - dano controlado
-// - IA escolhe alvo
-// - jogador fraco foge
 // - jogador forte persegue
-//
-// ======================================================
+// - jogador fraco foge
+// - forte tenta permanecer atrás/lateral do fraco
+// - corpos nunca devem ficar sobrepostos
+// - espaço das facas é respeitado fora do combate
+// - durante combate as pontas das facas podem se alcançar
+// - corpo não causa dano
+// - somente as facas causam dano
+// - a cada 3 rotações completas = -10 moedas
+// - 0 moedas = eliminado
+// ============================================================
 
 
-// ======================================================
+// ============================================================
 // CONFIGURAÇÕES
-// ======================================================
+// ============================================================
 
 const WIDTH = 1000;
 const HEIGHT = 650;
 
-
-// Rodada de 5 minutos
-
-const ROUND_DURATION_MS =
-    5 * 60 * 1000;
-
-
-// Grade espacial
+const ROUND_DURATION_MS = 5 * 60 * 1000;
 
 const GRID_SIZE = 180;
 
-
-// Distância considerada segura no spawn
-
-const SPAWN_SAFE_DISTANCE = 160;
-
-
-// Quantas tentativas serão feitas
-// para encontrar um bom spawn
-
+const SPAWN_SAFE_DISTANCE = 145;
 const SPAWN_ATTEMPTS = 60;
 
-
-// Proteção do novo jogador
-
-const SPAWN_PROTECTION_MS =
-    7000;
-
-
-// ======================================================
-// CORREÇÃO IMPORTANTE
-// ======================================================
-//
-// Esta constante estava faltando.
-//
-// Não representa limite de jogadores.
-// É somente o número máximo de jogadores
-// mostrados na lista lateral.
-//
+const SPAWN_PROTECTION_MS = 5000;
 
 const MAX_LIST_ROWS = 100;
-
-
-// ======================================================
-// FACAS VISUAIS
-// ======================================================
-//
-// O jogador pode ter:
-//
-// 100 facas
-// 500 facas
-// 1000 facas
-//
-// Não precisamos criar 1000 objetos visuais.
-//
-
 const MAX_VISUAL_KNIVES = 24;
 
 
-// ======================================================
+// ============================================================
+// MOVIMENTO
+// ============================================================
+
+const PLAYER_RADIUS = 28;
+
+// Espaço mínimo físico do corpo.
+const MIN_PLAYER_DISTANCE = 82;
+
+// Espaço extra para impedir que as áreas das facas
+// fiquem se sobrepondo quando não existe combate.
+const PLAYER_SPACE_MARGIN = 10;
+
+// Pequena distância adicional entre os corpos
+// quando dois jogadores estão efetivamente lutando.
+const COMBAT_BODY_GAP = 10;
+
+// Distância desejada entre o forte e o fraco.
+const BEHIND_DISTANCE = 118;
+
+const BEHIND_SIDE_OFFSET = 38;
+
+const BORDER_MARGIN = 65;
+
+const MIN_MOVE_SPEED = 24;
+const MAX_MOVE_SPEED = 48;
+
+const FLEE_SPEED = 42;
+const CHASE_SPEED = 34;
+
+const SEPARATION_FORCE = 2.8;
+
+
+// ============================================================
+// COMBATE
+// ============================================================
+
+// 3 voltas completas = -10 moedas
+const ROTATIONS_PER_COIN_DAMAGE = 3;
+
+const COINS_PER_ATTACK = 10;
+
+const MIN_ROTATION_SPEED = 0.055;
+const MAX_ROTATION_SPEED = 0.075;
+
+const KNIFE_LENGTH = 28;
+
+const TOOL_HIT_GAP = 10;
+
+
+// ============================================================
 // ESTADO
-// ======================================================
+// ============================================================
 
 let players = [];
 
+const playerMap = new Map();
 
-// userId -> player
+const pendingPlayers = new Map();
 
-const playerMap =
-    new Map();
-
-
-// userId -> jogador aguardando
-
-const pendingPlayers =
-    new Map();
-
-
-// grade espacial
-
-let spatialGrid =
-    new Map();
-
-
-// cena
+let spatialGrid = new Map();
 
 let scene = null;
-
-
-// ======================================================
-// ELEMENTOS VISUAIS
-// ======================================================
 
 let weaponGraphics = null;
 
 let playerCountText = null;
-
 let roundTimerText = null;
-
 let roundText = null;
-
 let battleText = null;
 
-
-// ======================================================
-// RODADA
-// ======================================================
-
 let roundNumber = 1;
-
 let roundElapsedMs = 0;
 
 let roundActive = false;
-
 let roundEnded = false;
 
 let battleMessageTimer = 0;
 
-let lastDisplayedSecond = -1;
-
-
-// ======================================================
-// CORES
-// ======================================================
-
 let nextColorIndex = 0;
 
+let listUpdateTimer = 0;
 
-// ======================================================
-// CONVERTER HSL PARA COR
-// ======================================================
+let playerSequence = 0;
 
-function hslToColorInt(
-    h,
-    s,
-    l
-) {
+
+// ============================================================
+// CORES
+// ============================================================
+
+function hslToColorInt(h, s, l) {
 
     s /= 100;
     l /= 100;
 
-
-    const k =
-        n =>
-            (
-                n +
-                h / 30
-            ) % 12;
-
+    const k = n =>
+        (n + h / 30) % 12;
 
     const a =
         s *
@@ -187,53 +146,31 @@ function hslToColorInt(
             1 - l
         );
 
-
-    const f =
-        n =>
-            l -
-            a *
-            Math.max(
-                -1,
+    const f = n =>
+        l -
+        a *
+        Math.max(
+            -1,
+            Math.min(
+                k(n) - 3,
                 Math.min(
-                    k(n) - 3,
-                    Math.min(
-                        9 - k(n),
-                        1
-                    )
+                    9 - k(n),
+                    1
                 )
-            );
-
-
-    const r =
-        Math.round(
-            255 * f(0)
+            )
         );
 
-
-    const g =
-        Math.round(
-            255 * f(8)
-        );
-
-
-    const b =
-        Math.round(
-            255 * f(4)
-        );
-
+    const r = Math.round(255 * f(0));
+    const g = Math.round(255 * f(8));
+    const b = Math.round(255 * f(4));
 
     return (
         (r << 16) |
         (g << 8) |
         b
     );
-
 }
 
-
-// ======================================================
-// PRÓXIMA COR
-// ======================================================
 
 function getNextColor() {
 
@@ -243,60 +180,235 @@ function getNextColor() {
             137.508
         ) % 360;
 
-
     nextColorIndex++;
-
 
     return hslToColorInt(
         hue,
         75,
         58
     );
-
 }
 
 
-// ======================================================
-// COR PARA HEX
-// ======================================================
-
-function colorToHex(
-    color
-) {
+function colorToHex(color) {
 
     return (
         "#" +
         color
             .toString(16)
-            .padStart(
-                6,
-                "0"
-            )
+            .padStart(6, "0")
     );
 
 }
 
 
-// ======================================================
-// CONFIGURAÇÃO PHASER
-// ======================================================
+// ============================================================
+// UTILITÁRIOS
+// ============================================================
+
+function clamp(value, min, max) {
+
+    return Math.max(
+        min,
+        Math.min(max, value)
+    );
+
+}
+
+
+function distanceBetween(
+    x1,
+    y1,
+    x2,
+    y2
+) {
+
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+
+    return Math.sqrt(
+        dx * dx +
+        dy * dy
+    );
+
+}
+
+
+function normalizeVector(x, y) {
+
+    const length =
+        Math.sqrt(
+            x * x +
+            y * y
+        );
+
+    if (length < 0.0001) {
+
+        return {
+            x: 0,
+            y: 0
+        };
+
+    }
+
+    return {
+        x: x / length,
+        y: y / length
+    };
+
+}
+
+
+function normalizeAngle(angle) {
+
+    while (
+        angle > Math.PI
+    ) {
+
+        angle -=
+            Math.PI * 2;
+
+    }
+
+    while (
+        angle < -Math.PI
+    ) {
+
+        angle +=
+            Math.PI * 2;
+
+    }
+
+    return angle;
+
+}
+
+
+// ============================================================
+// FACAS
+// ============================================================
+
+function calculateKnifeCount(coins) {
+
+    return Math.floor(
+        Math.max(
+            0,
+            Number(coins) || 0
+        ) / 10
+    );
+
+}
+
+
+function calculatePower(knifeCount) {
+
+    if (
+        knifeCount <= 0
+    ) {
+
+        return 0;
+
+    }
+
+    return (
+        5 +
+        Math.sqrt(
+            knifeCount
+        ) * 2
+    );
+
+}
+
+
+// Distância do centro até a base da faca.
+function getOrbitRadius(player) {
+
+    return (
+        56 +
+        Math.min(
+            42,
+            Math.sqrt(
+                player.knifeCount
+            ) * 2.8
+        )
+    );
+
+}
+
+
+// Alcance total do centro do jogador
+// até a ponta da faca.
+function getPlayerWeaponReach(player) {
+
+    if (
+        !player ||
+        player.knifeCount <= 0
+    ) {
+
+        return 0;
+
+    }
+
+    return (
+        getOrbitRadius(player) +
+        KNIFE_LENGTH
+    );
+
+}
+
+
+// ============================================================
+// ESPAÇO OCUPADO PELO PLAYER
+// ============================================================
+//
+// Fora de combate:
+//
+// corpo + órbita + comprimento da faca
+//
+// Isso faz com que dois jogadores não fiquem
+// simplesmente um por cima das facas do outro.
+//
+// Durante combate existe uma exceção:
+// eles podem aproximar as pontas das facas,
+// mas nunca os corpos.
+//
+
+function getPlayerSpaceRadius(player) {
+
+    if (!player || !player.alive) {
+
+        return PLAYER_RADIUS;
+
+    }
+
+    return (
+        PLAYER_RADIUS +
+        getPlayerWeaponReach(player) +
+        PLAYER_SPACE_MARGIN
+    );
+
+}
+
+
+// ============================================================
+// PHASER
+// ============================================================
 
 const config = {
 
     type: Phaser.AUTO,
 
     width: WIDTH,
-
     height: HEIGHT,
 
     parent: "game-container",
 
-    backgroundColor: "#111827",
+    backgroundColor:
+        "#111827",
 
     scene: {
 
         create: create,
-
         update: update
 
     }
@@ -308,29 +420,27 @@ const game =
     new Phaser.Game(config);
 
 
-// ======================================================
+// ============================================================
 // CREATE
-// ======================================================
+// ============================================================
 
 function create() {
 
     scene = this;
 
 
-    // ==================================================
-    // GRADE DO MAPA
-    // ==================================================
+    // ========================================================
+    // GRADE
+    // ========================================================
 
     const grid =
         scene.add.graphics();
-
 
     grid.lineStyle(
         1,
         0x222b3a,
         0.5
     );
-
 
     for (
         let x = 0;
@@ -346,7 +456,6 @@ function create() {
         );
 
     }
-
 
     for (
         let y = 0;
@@ -364,22 +473,40 @@ function create() {
     }
 
 
-    // ==================================================
-    // CAMADA GLOBAL DAS FACAS
-    // ==================================================
+    // ========================================================
+    // BORDA
+    // ========================================================
+
+    const border =
+        scene.add.graphics();
+
+    border.lineStyle(
+        4,
+        0x374151,
+        1
+    );
+
+    border.strokeRect(
+        8,
+        8,
+        WIDTH - 16,
+        HEIGHT - 16
+    );
+
+
+    // ========================================================
+    // FACAS
+    // ========================================================
 
     weaponGraphics =
         scene.add.graphics();
 
-
-    weaponGraphics.setDepth(
-        3
-    );
+    weaponGraphics.setDepth(3);
 
 
-    // ==================================================
+    // ========================================================
     // HUD
-    // ==================================================
+    // ========================================================
 
     playerCountText =
         scene.add.text(
@@ -388,11 +515,8 @@ function create() {
             "",
             {
                 fontSize: "19px",
-
                 color: "#ffffff",
-
-                fontStyle:
-                    "bold"
+                fontStyle: "bold"
             }
         );
 
@@ -404,9 +528,7 @@ function create() {
             "",
             {
                 fontSize: "14px",
-
-                color:
-                    "#9ca3af"
+                color: "#9ca3af"
             }
         );
 
@@ -418,15 +540,10 @@ function create() {
             "",
             {
                 fontSize: "22px",
-
-                color:
-                    "#ffffff",
-
-                fontStyle:
-                    "bold"
+                color: "#ffffff",
+                fontStyle: "bold"
             }
         );
-
 
     roundTimerText.setOrigin(
         1,
@@ -441,40 +558,25 @@ function create() {
             "",
             {
                 fontSize: "20px",
-
-                color:
-                    "#ffffff",
-
-                fontStyle:
-                    "bold"
+                color: "#ffffff",
+                fontStyle: "bold"
             }
         );
 
+    battleText.setOrigin(0.5);
 
-    battleText.setOrigin(
-        0.5
-    );
-
-
-    // ==================================================
-    // TELA FINAL
-    // ==================================================
 
     createWinnerOverlay();
 
-
-    // ==================================================
-    // COMEÇAR
-    // ==================================================
 
     beginRound();
 
 }
 
 
-// ======================================================
+// ============================================================
 // WINNER OVERLAY
-// ======================================================
+// ============================================================
 
 function createWinnerOverlay() {
 
@@ -484,15 +586,8 @@ function createWinnerOverlay() {
             HEIGHT / 2
         );
 
+    scene.winnerContainer.setDepth(100);
 
-    scene.winnerContainer.setDepth(
-        100
-    );
-
-
-    // ==================================================
-    // FUNDO
-    // ==================================================
 
     const background =
         scene.add.rectangle(
@@ -505,36 +600,20 @@ function createWinnerOverlay() {
         );
 
 
-    // ==================================================
-    // WIN
-    // ==================================================
-
     const winText =
         scene.add.text(
             0,
             -205,
             "WIN",
             {
-                fontSize:
-                    "115px",
-
-                color:
-                    "#ffffff",
-
-                fontStyle:
-                    "bold"
+                fontSize: "115px",
+                color: "#ffffff",
+                fontStyle: "bold"
             }
         );
 
+    winText.setOrigin(0.5);
 
-    winText.setOrigin(
-        0.5
-    );
-
-
-    // ==================================================
-    // AVATAR
-    // ==================================================
 
     const winnerAvatar =
         scene.add.text(
@@ -542,20 +621,12 @@ function createWinnerOverlay() {
             -80,
             "😎",
             {
-                fontSize:
-                    "68px"
+                fontSize: "68px"
             }
         );
 
+    winnerAvatar.setOrigin(0.5);
 
-    winnerAvatar.setOrigin(
-        0.5
-    );
-
-
-    // ==================================================
-    // NOME
-    // ==================================================
 
     const winnerName =
         scene.add.text(
@@ -563,26 +634,14 @@ function createWinnerOverlay() {
             5,
             "",
             {
-                fontSize:
-                    "46px",
-
-                color:
-                    "#ffffff",
-
-                fontStyle:
-                    "bold"
+                fontSize: "46px",
+                color: "#ffffff",
+                fontStyle: "bold"
             }
         );
 
+    winnerName.setOrigin(0.5);
 
-    winnerName.setOrigin(
-        0.5
-    );
-
-
-    // ==================================================
-    // KILLS
-    // ==================================================
 
     const killsText =
         scene.add.text(
@@ -590,26 +649,14 @@ function createWinnerOverlay() {
             68,
             "",
             {
-                fontSize:
-                    "28px",
-
-                color:
-                    "#ffffff",
-
-                fontStyle:
-                    "bold"
+                fontSize: "28px",
+                color: "#ffffff",
+                fontStyle: "bold"
             }
         );
 
+    killsText.setOrigin(0.5);
 
-    killsText.setOrigin(
-        0.5
-    );
-
-
-    // ==================================================
-    // FINAL
-    // ==================================================
 
     const finalText =
         scene.add.text(
@@ -617,26 +664,14 @@ function createWinnerOverlay() {
             125,
             "RODADA FINALIZADA",
             {
-                fontSize:
-                    "18px",
-
-                color:
-                    "#9ca3af",
-
-                fontStyle:
-                    "bold"
+                fontSize: "18px",
+                color: "#9ca3af",
+                fontStyle: "bold"
             }
         );
 
+    finalText.setOrigin(0.5);
 
-    finalText.setOrigin(
-        0.5
-    );
-
-
-    // ==================================================
-    // INSTRUÇÃO
-    // ==================================================
 
     const instructionText =
         scene.add.text(
@@ -644,31 +679,23 @@ function createWinnerOverlay() {
             165,
             'Clique em "Nova rodada"',
             {
-                fontSize:
-                    "14px",
-
-                color:
-                    "#6b7280"
+                fontSize: "14px",
+                color: "#6b7280"
             }
         );
 
-
-    instructionText.setOrigin(
-        0.5
-    );
+    instructionText.setOrigin(0.5);
 
 
-    scene.winnerContainer.add(
-        [
-            background,
-            winText,
-            winnerAvatar,
-            winnerName,
-            killsText,
-            finalText,
-            instructionText
-        ]
-    );
+    scene.winnerContainer.add([
+        background,
+        winText,
+        winnerAvatar,
+        winnerName,
+        killsText,
+        finalText,
+        instructionText
+    ]);
 
 
     scene.winnerContainer.setVisible(
@@ -678,99 +705,67 @@ function createWinnerOverlay() {
 
     scene.winnerData = {
 
-        winText:
-            winText,
-
-        winnerAvatar:
-            winnerAvatar,
-
-        winnerName:
-            winnerName,
-
-        killsText:
-            killsText
+        winText,
+        winnerAvatar,
+        winnerName,
+        killsText
 
     };
 
 }
 
 
-// ======================================================
-// INICIAR RODADA
-// ======================================================
+// ============================================================
+// RODADA
+// ============================================================
 
 function beginRound() {
 
     clearCurrentRound();
 
+    roundElapsedMs = 0;
 
-    roundElapsedMs =
-        0;
+    roundActive = true;
+    roundEnded = false;
 
+    battleMessageTimer = 0;
 
-    roundActive =
-        true;
-
-
-    roundEnded =
-        false;
-
-
-    battleMessageTimer =
-        0;
-
-
-    lastDisplayedSecond =
-        -1;
-
-
-    battleText.setText(
-        ""
-    );
-
-
-    const newRoundButton =
+    const button =
         document.getElementById(
             "new-round-button"
         );
 
+    if (button) {
 
-    newRoundButton.disabled =
-        true;
+        button.disabled = true;
+
+    }
 
 
     createInitialBots();
 
-
     updateRoundTimer();
-
     updatePlayersList();
-
     updatePlayerPreview();
 
 }
 
 
-// ======================================================
+// ============================================================
 // NOVA RODADA
-// ======================================================
+// ============================================================
 
 function startNewRound() {
 
-    if (
-        roundActive
-    ) {
+    if (roundActive) {
 
         return;
 
     }
 
-
     roundNumber++;
 
-
     beginRound();
-
 
     setStatus(
         "🔥 Nova rodada iniciada!"
@@ -779,110 +774,37 @@ function startNewRound() {
 }
 
 
-// ======================================================
+// ============================================================
 // LIMPAR RODADA
-// ======================================================
+// ============================================================
 
 function clearCurrentRound() {
 
     for (
-        const player
-        of players
+        const player of players
     ) {
 
-        if (
-            player.aura
-        ) {
-
-            player.aura.destroy();
-
-        }
-
-
-        if (
-            player.avatarText
-        ) {
-
-            player.avatarText.destroy();
-
-        }
-
-
-        if (
-            player.nameText
-        ) {
-
-            player.nameText.destroy();
-
-        }
-
-
-        if (
-            player.coinText
-        ) {
-
-            player.coinText.destroy();
-
-        }
-
-
-        if (
-            player.knifeText
-        ) {
-
-            player.knifeText.destroy();
-
-        }
-
-
-        if (
-            player.killText
-        ) {
-
-            player.killText.destroy();
-
-        }
-
-
-        if (
-            player.hpBackground
-        ) {
-
-            player.hpBackground.destroy();
-
-        }
-
-
-        if (
-            player.hpBar
-        ) {
-
-            player.hpBar.destroy();
-
-        }
+        destroyPlayerVisuals(
+            player
+        );
 
     }
 
 
     players = [];
 
-
     playerMap.clear();
-
 
     pendingPlayers.clear();
 
-
     spatialGrid.clear();
 
+    nextColorIndex = 0;
 
-    nextColorIndex =
-        0;
+    playerSequence = 0;
 
 
-    if (
-        weaponGraphics
-    ) {
+    if (weaponGraphics) {
 
         weaponGraphics.clear();
 
@@ -890,36 +812,58 @@ function clearCurrentRound() {
 
 
     if (
+        scene &&
         scene.winnerContainer
     ) {
 
         scene.winnerContainer
-            .setVisible(
-                false
-            );
-
-    }
-
-
-    // Cancelar apenas animações
-    // do vencedor.
-
-    if (
-        scene.winnerData
-    ) {
-
-        scene.tweens.killTweensOf(
-            scene.winnerData.winText
-        );
+            .setVisible(false);
 
     }
 
 }
 
 
-// ======================================================
-// BOTS
-// ======================================================
+// ============================================================
+// DESTRUIR VISUAIS
+// ============================================================
+
+function destroyPlayerVisuals(player) {
+
+    const visuals = [
+
+        player.aura,
+        player.avatarText,
+        player.nameText,
+        player.coinText,
+        player.knifeText,
+        player.killText,
+        player.hpBackground,
+        player.hpBar
+
+    ];
+
+    for (
+        const object of visuals
+    ) {
+
+        if (
+            object &&
+            object.destroy
+        ) {
+
+            object.destroy();
+
+        }
+
+    }
+
+}
+
+
+// ============================================================
+// BOTS INICIAIS
+// ============================================================
 
 function createInitialBots() {
 
@@ -957,115 +901,38 @@ function createInitialBots() {
 }
 
 
-// ======================================================
-// FACAS
-// ======================================================
-
-function calculateKnifeCount(
-    coins
-) {
-
-    return Math.floor(
-        Number(coins) / 10
-    );
-
-}
-
-
-// ======================================================
-// FORÇA
-// ======================================================
-
-function calculatePower(
-    knifeCount
-) {
-
-    if (
-        knifeCount <= 0
-    ) {
-
-        return 0;
-
-    }
-
-
-    return (
-        5 +
-        Math.sqrt(
-            knifeCount
-        ) * 2
-    );
-
-}
-
-
-// ======================================================
-// RAIO DAS FACAS
-// ======================================================
-
-function getOrbitRadius(
-    player
-) {
-
-    return (
-        56 +
-        Math.min(
-            42,
-            Math.sqrt(
-                player.knifeCount
-            ) * 2.8
-        )
-    );
-
-}
-
-
-// ======================================================
+// ============================================================
 // GRID
-// ======================================================
+// ============================================================
 
-function getGridKey(
-    x,
-    y
-) {
+function getGridKey(x, y) {
 
     return (
         Math.floor(
-            x /
-            GRID_SIZE
+            x / GRID_SIZE
         ) +
         ":" +
         Math.floor(
-            y /
-            GRID_SIZE
+            y / GRID_SIZE
         )
     );
 
 }
 
-
-// ======================================================
-// RECONSTRUIR GRID
-// ======================================================
 
 function rebuildSpatialGrid() {
 
     spatialGrid.clear();
 
-
     for (
-        const player
-        of players
+        const player of players
     ) {
 
-        if (
-            !player.alive
-        ) {
+        if (!player.alive) {
 
             continue;
 
         }
-
 
         const key =
             getGridKey(
@@ -1073,11 +940,8 @@ function rebuildSpatialGrid() {
                 player.y
             );
 
-
         if (
-            !spatialGrid.has(
-                key
-            )
+            !spatialGrid.has(key)
         ) {
 
             spatialGrid.set(
@@ -1087,21 +951,14 @@ function rebuildSpatialGrid() {
 
         }
 
-
         spatialGrid
             .get(key)
-            .push(
-                player
-            );
+            .push(player);
 
     }
 
 }
 
-
-// ======================================================
-// JOGADORES PERTO
-// ======================================================
 
 function getPlayersNearPosition(
     x,
@@ -1111,24 +968,18 @@ function getPlayersNearPosition(
 
     const cellX =
         Math.floor(
-            x /
-            GRID_SIZE
+            x / GRID_SIZE
         );
-
 
     const cellY =
         Math.floor(
-            y /
-            GRID_SIZE
+            y / GRID_SIZE
         );
-
 
     const cellRadius =
         Math.ceil(
-            radius /
-            GRID_SIZE
+            radius / GRID_SIZE
         );
-
 
     const result = [];
 
@@ -1147,21 +998,15 @@ function getPlayersNearPosition(
 
             const key =
                 (
-                    cellX +
-                    dx
+                    cellX + dx
                 ) +
                 ":" +
                 (
-                    cellY +
-                    dy
+                    cellY + dy
                 );
-
 
             const cell =
-                spatialGrid.get(
-                    key
-                );
-
+                spatialGrid.get(key);
 
             if (!cell) {
 
@@ -1169,15 +1014,22 @@ function getPlayersNearPosition(
 
             }
 
-
             for (
-                const player
-                of cell
+                const player of cell
             ) {
 
-                result.push(
-                    player
-                );
+                if (
+                    distanceBetween(
+                        x,
+                        y,
+                        player.x,
+                        player.y
+                    ) <= radius
+                ) {
+
+                    result.push(player);
+
+                }
 
             }
 
@@ -1185,70 +1037,40 @@ function getPlayersNearPosition(
 
     }
 
-
     return result;
 
 }
 
 
-// ======================================================
-// SPAWN SEGURO
-// ======================================================
+// ============================================================
+// SPAWN
+// ============================================================
 
 function findSafeSpawnPosition() {
 
     rebuildSpatialGrid();
 
-
-    let bestPosition =
-        null;
-
-
-    let bestDistance =
-        -1;
+    let bestPosition = null;
+    let bestDistance = -1;
 
 
     for (
         let attempt = 0;
-        attempt <
-        SPAWN_ATTEMPTS;
+        attempt < SPAWN_ATTEMPTS;
         attempt++
     ) {
 
         const x =
             Phaser.Math.Between(
-                80,
-                WIDTH - 80
+                120,
+                WIDTH - 120
             );
-
 
         const y =
             Phaser.Math.Between(
-                100,
-                HEIGHT - 80
+                120,
+                HEIGHT - 120
             );
-
-
-        const nearby =
-            getPlayersNearPosition(
-                x,
-                y,
-                SPAWN_SAFE_DISTANCE
-            );
-
-
-        // Nenhum jogador nessa área
-
-        if (
-            nearby.length === 0
-        ) {
-
-            return {
-                x,
-                y
-            };
-
-        }
 
 
         let nearest =
@@ -1256,9 +1078,15 @@ function findSafeSpawnPosition() {
 
 
         for (
-            const player
-            of nearby
+            const player of players
         ) {
+
+            if (!player.alive) {
+
+                continue;
+
+            }
+
 
             const distance =
                 distanceBetween(
@@ -1268,16 +1096,24 @@ function findSafeSpawnPosition() {
                     player.y
                 );
 
+            nearest =
+                Math.min(
+                    nearest,
+                    distance
+                );
 
-            if (
-                distance <
-                nearest
-            ) {
+        }
 
-                nearest =
-                    distance;
 
-            }
+        if (
+            nearest >=
+            SPAWN_SAFE_DISTANCE
+        ) {
+
+            return {
+                x,
+                y
+            };
 
         }
 
@@ -1290,7 +1126,6 @@ function findSafeSpawnPosition() {
             bestDistance =
                 nearest;
 
-
             bestPosition = {
                 x,
                 y
@@ -1301,31 +1136,19 @@ function findSafeSpawnPosition() {
     }
 
 
-    if (
-        bestPosition
-    ) {
-
-        return bestPosition;
-
-    }
-
-
-    return {
-
-        x:
-            WIDTH / 2,
-
-        y:
-            HEIGHT / 2
-
-    };
+    return (
+        bestPosition || {
+            x: WIDTH / 2,
+            y: HEIGHT / 2
+        }
+    );
 
 }
 
 
-// ======================================================
+// ============================================================
 // CRIAR JOGADOR
-// ======================================================
+// ============================================================
 
 function addPlayerToArena(
     name,
@@ -1335,14 +1158,8 @@ function addPlayerToArena(
 ) {
 
     const normalizedId =
-        String(
-            userId
-        );
+        String(userId);
 
-
-    // ================================================
-    // EVITAR DUPLICAÇÃO
-    // ================================================
 
     const existing =
         playerMap.get(
@@ -1350,29 +1167,26 @@ function addPlayerToArena(
         );
 
 
-    if (
-        existing
-    ) {
+    if (existing) {
+
+        if (
+            Number(coins) > 0
+        ) {
+
+            addCoinsToExistingPlayer(
+                existing,
+                Number(coins)
+            );
+
+        }
 
         return existing;
 
     }
 
 
-    // ================================================
-    // SPAWN
-    // ================================================
-
     const spawn =
         findSafeSpawnPosition();
-
-
-    // ================================================
-    // COR
-    // ================================================
-
-    const color =
-        getNextColor();
 
 
     const safeCoins =
@@ -1382,21 +1196,34 @@ function addPlayerToArena(
         );
 
 
-    // ================================================
-    // PLAYER
-    // ================================================
+    const knifeCount =
+        calculateKnifeCount(
+            safeCoins
+        );
+
+
+    const color =
+        getNextColor();
+
+
+    const wanderAngle =
+        Math.random() *
+        Math.PI * 2;
+
 
     const player = {
 
         userId:
             normalizedId,
 
+        sequence:
+            ++playerSequence,
+
         name:
-            name,
+            name || "Player",
 
         avatar:
-            avatar,
-
+            avatar || "😎",
 
         x:
             spawn.x,
@@ -1404,189 +1231,117 @@ function addPlayerToArena(
         y:
             spawn.y,
 
-
         targetX:
             spawn.x,
 
         targetY:
             spawn.y,
 
-
         coins:
             safeCoins,
 
-
-        knifeCount:
-            calculateKnifeCount(
-                safeCoins
-            ),
-
+        knifeCount,
 
         power:
-            0,
+            calculatePower(
+                knifeCount
+            ),
 
+        color,
 
-        color:
-            color,
+        maxHp: 600,
 
+        hp: 600,
 
-        // ==========================================
-        // VIDA
-        // ==========================================
+        alive: true,
 
-        maxHp:
-            600,
+        waiting: false,
 
-        hp:
-            600,
+        kills: 0,
 
+        targetId: null,
 
-        // ==========================================
-        // ESTADO
-        // ==========================================
+        aiMode: "wander",
 
-        alive:
-            true,
+        aiTimer: Phaser.Math.Between(
+            700,
+            1500
+        ),
 
-        waiting:
-            false,
+        moveTimer: 0,
 
+        wanderAngle,
 
-        // ==========================================
-        // KILLS
-        // ==========================================
+        wanderTimer:
+            Phaser.Math.Between(
+                900,
+                2200
+            ),
 
-        kills:
-            0,
+        fleeSide:
+            Math.random() < 0.5
+                ? -1
+                : 1,
 
+        behindSide:
+            Math.random() < 0.5
+                ? -1
+                : 1,
 
-        // ==========================================
-        // IA
-        // ==========================================
+        lastMoveDirX:
+            Math.cos(
+                wanderAngle
+            ),
 
-        targetId:
-            null,
-
-        aiMode:
-            "wander",
-
-        aiTimer:
-            0,
-
-
-        // ==========================================
-        // MOVIMENTO
-        // ==========================================
-
-        moveTimer:
-            0,
-
-
-        // ==========================================
-        // ROTAÇÃO
-        // ==========================================
+        lastMoveDirY:
+            Math.sin(
+                wanderAngle
+            ),
 
         rotationAngle:
             Math.random() *
             Math.PI * 2,
 
         rotationSpeed:
-            0.02,
-
-
-        // ==========================================
-        // ATAQUE
-        // ==========================================
-
-        attackTimer:
-            Phaser.Math.Between(
-                900,
-                1600
+            Phaser.Math.FloatBetween(
+                MIN_ROTATION_SPEED,
+                MAX_ROTATION_SPEED
             ),
 
-
-        // ==========================================
-        // PROTEÇÃO
-        // ==========================================
+        rotationTurns: 0,
 
         spawnProtectionMs:
             SPAWN_PROTECTION_MS,
 
+        recentHitMs: 0,
 
-        // ==========================================
-        // HIT RECENTE
-        // ==========================================
-
-        recentHitMs:
-            0,
-
-
-        // ==========================================
-        // VISUAIS
-        // ==========================================
-
-        aura:
-            null,
-
-        avatarText:
-            null,
-
-        nameText:
-            null,
-
-        coinText:
-            null,
-
-        knifeText:
-            null,
-
-        killText:
-            null,
-
-        hpBackground:
-            null,
-
-        hpBar:
-            null
+        aura: null,
+        avatarText: null,
+        nameText: null,
+        coinText: null,
+        knifeText: null,
+        killText: null,
+        hpBackground: null,
+        hpBar: null
 
     };
 
 
-    player.power =
-        calculatePower(
-            player.knifeCount
-        );
-
-
-    // ================================================
-    // AURA
-    // ================================================
+    // ========================================================
+    // VISUAL
+    // ========================================================
 
     player.aura =
         scene.add.circle(
             player.x,
             player.y,
-            31,
+            PLAYER_RADIUS + 6,
             player.color,
-            0.13
+            0.16
         );
 
+    player.aura.setDepth(1);
 
-    player.aura.setStrokeStyle(
-        2,
-        player.color,
-        0.9
-    );
-
-
-    player.aura.setDepth(
-        1
-    );
-
-
-    // ================================================
-    // AVATAR
-    // ================================================
 
     player.avatarText =
         scene.add.text(
@@ -1594,217 +1349,134 @@ function addPlayerToArena(
             player.y,
             player.avatar,
             {
-                fontSize:
-                    "45px"
+                fontSize: "28px"
             }
         );
 
-
-    player.avatarText
-        .setOrigin(
-            0.5
-        );
-
-
-    player.avatarText.setDepth(
-        5
+    player.avatarText.setOrigin(
+        0.5
     );
 
+    player.avatarText.setDepth(5);
 
-    // ================================================
-    // NOME
-    // ================================================
 
     player.nameText =
         scene.add.text(
             player.x,
-            player.y - 45,
+            player.y - 43,
             player.name,
             {
-                fontSize:
-                    "14px",
-
-                color:
-                    colorToHex(
-                        player.color
-                    ),
-
-                fontStyle:
-                    "bold"
+                fontSize: "14px",
+                color: "#ffffff",
+                fontStyle: "bold",
+                stroke: "#000000",
+                strokeThickness: 3
             }
         );
 
-
-    player.nameText
-        .setOrigin(
-            0.5
-        );
-
-
-    player.nameText.setDepth(
-        6
+    player.nameText.setOrigin(
+        0.5
     );
 
+    player.nameText.setDepth(6);
 
-    // ================================================
-    // MOEDAS
-    // ================================================
 
     player.coinText =
         scene.add.text(
             player.x,
-            player.y + 44,
-            "🪙 " +
-            player.coins,
+            player.y + 35,
+            `🪙 ${player.coins}`,
             {
-                fontSize:
-                    "11px",
-
-                color:
-                    "#facc15",
-
-                fontStyle:
-                    "bold"
+                fontSize: "12px",
+                color: "#ffffff",
+                stroke: "#000000",
+                strokeThickness: 3
             }
         );
 
-
-    player.coinText
-        .setOrigin(
-            0.5
-        );
-
-
-    player.coinText.setDepth(
-        6
+    player.coinText.setOrigin(
+        0.5
     );
 
+    player.coinText.setDepth(6);
 
-    // ================================================
-    // FACAS
-    // ================================================
 
     player.knifeText =
         scene.add.text(
             player.x,
-            player.y + 58,
-            "🔪 " +
-            player.knifeCount,
+            player.y + 50,
+            `🔪 ${player.knifeCount}`,
             {
-                fontSize:
-                    "11px",
-
-                color:
-                    "#ffffff",
-
-                fontStyle:
-                    "bold"
+                fontSize: "11px",
+                color: "#d1d5db",
+                stroke: "#000000",
+                strokeThickness: 2
             }
         );
 
-
-    player.knifeText
-        .setOrigin(
-            0.5
-        );
-
-
-    player.knifeText.setDepth(
-        6
+    player.knifeText.setOrigin(
+        0.5
     );
 
+    player.knifeText.setDepth(6);
 
-    // ================================================
-    // KILLS
-    // ================================================
 
     player.killText =
         scene.add.text(
             player.x,
-            player.y + 72,
-            "💀 0",
+            player.y + 64,
+            `💀 ${player.kills}`,
             {
-                fontSize:
-                    "10px",
-
-                color:
-                    "#ff8787",
-
-                fontStyle:
-                    "bold"
+                fontSize: "10px",
+                color: "#fca5a5",
+                stroke: "#000000",
+                strokeThickness: 2
             }
         );
 
-
-    player.killText
-        .setOrigin(
-            0.5
-        );
-
-
-    player.killText.setDepth(
-        6
+    player.killText.setOrigin(
+        0.5
     );
 
+    player.killText.setDepth(6);
 
-    // ================================================
-    // HP BACKGROUND
-    // ================================================
 
     player.hpBackground =
         scene.add.rectangle(
             player.x,
-            player.y + 34,
+            player.y + 78,
             60,
-            6,
-            0x333333
+            5,
+            0x000000,
+            0.8
         );
 
-
-    player.hpBackground
-        .setOrigin(
-            0.5
-        );
-
-
-    player.hpBackground.setDepth(
-        4
+    player.hpBackground.setOrigin(
+        0.5
     );
 
+    player.hpBackground.setDepth(6);
 
-    // ================================================
-    // HP
-    // ================================================
 
     player.hpBar =
         scene.add.rectangle(
             player.x - 30,
-            player.y + 34,
+            player.y + 78,
             60,
-            6,
-            player.color
+            5,
+            0x22c55e,
+            1
         );
-
 
     player.hpBar.setOrigin(
         0,
         0.5
     );
 
-
-    player.hpBar.setDepth(
-        5
-    );
+    player.hpBar.setDepth(7);
 
 
-    // ================================================
-    // SALVAR
-    // ================================================
-
-    players.push(
-        player
-    );
-
+    players.push(player);
 
     playerMap.set(
         normalizedId,
@@ -1812,354 +1484,235 @@ function addPlayerToArena(
     );
 
 
+    updatePlayerVisuals(
+        player,
+        0
+    );
+
+    updatePlayersList();
+
+
     return player;
 
 }
 
 
-// ======================================================
-// SOMAR MOEDAS AO PLAYER
-// ======================================================
+// ============================================================
+// IA
+// ============================================================
 
-function addCoinsToExistingPlayer(
-    player,
-    amount
-) {
+function getTargeters(target) {
 
-    if (
-        !player
+    let count = 0;
+
+    for (
+        const player of players
     ) {
 
-        return;
+        if (
+            !player.alive ||
+            player === target
+        ) {
+
+            continue;
+
+        }
+
+        if (
+            player.targetId ===
+            target.userId
+        ) {
+
+            count++;
+
+        }
 
     }
 
-
-    if (
-        !player.alive
-    ) {
-
-        setStatus(
-            "💀 " +
-            player.name +
-            " já foi eliminado."
-        );
-
-        return;
-
-    }
-
-
-    const oldCoins =
-        player.coins;
-
-
-    const oldKnives =
-        player.knifeCount;
-
-
-    // ================================================
-    // SOMAR
-    // ================================================
-
-    player.coins +=
-        Number(amount);
-
-
-    // ================================================
-    // RECALCULAR
-    // ================================================
-
-    player.knifeCount =
-        calculateKnifeCount(
-            player.coins
-        );
-
-
-    player.power =
-        calculatePower(
-            player.knifeCount
-        );
-
-
-    // ================================================
-    // ATUALIZAR VISUAL
-    // ================================================
-
-    player.coinText.setText(
-        "🪙 " +
-        player.coins
-    );
-
-
-    player.knifeText.setText(
-        "🔪 " +
-        player.knifeCount
-    );
-
-
-    // ================================================
-    // QUANTAS FACAS GANHOU
-    // ================================================
-
-    const gained =
-        player.knifeCount -
-        oldKnives;
-
-
-    if (
-        gained > 0
-    ) {
-
-        showBattleMessage(
-            "🔪 " +
-            player.name +
-            " ganhou +" +
-            gained +
-            " faca" +
-            (
-                gained === 1
-                    ? ""
-                    : "s"
-            ) +
-            "!"
-        );
-
-    }
-
-
-    setStatus(
-        "🪙 " +
-        player.name +
-        " agora possui " +
-        player.coins +
-        " moedas e " +
-        player.knifeCount +
-        " facas."
-    );
-
-
-    updatePlayersList();
-
-    updatePlayerPreview();
+    return count;
 
 }
 
 
-// ======================================================
-// ESCOLHER ALVO
-// ======================================================
+function chooseTarget(player) {
 
-function chooseTarget(
-    player
-) {
-
-    const nearby =
-        getPlayersNearPosition(
-            player.x,
-            player.y,
-            500
+    const opponents =
+        players.filter(
+            other =>
+                other !== player &&
+                other.alive &&
+                other.spawnProtectionMs <= 0
         );
 
 
-    const candidates =
-        [];
-
-
-    for (
-        const other
-        of nearby
-    ) {
-
-        if (
-            other === player
-        ) {
-
-            continue;
-
-        }
-
-
-        if (
-            !other.alive
-        ) {
-
-            continue;
-
-        }
-
-
-        // Não perseguir recém-chegados
-
-        if (
-            other.spawnProtectionMs >
-            0
-        ) {
-
-            continue;
-
-        }
-
-
-        const distance =
-            distanceBetween(
-                player.x,
-                player.y,
-                other.x,
-                other.y
-            );
-
-
-        candidates.push({
-
-            player:
-                other,
-
-            distance:
-                distance
-
-        });
-
-    }
-
-
     if (
-        candidates.length === 0
+        opponents.length === 0
     ) {
+
+        player.targetId = null;
 
         return null;
 
     }
 
 
-    // ================================================
-    // SE TEM FORÇA:
-    // PROCURAR MAIS FRACOS
-    // ================================================
+    let candidates =
+        opponents.filter(
+            target =>
+                player.power >=
+                target.power * 1.10
+        );
+
 
     if (
-        player.knifeCount > 0
+        candidates.length === 0
     ) {
 
-        const weaker =
-            candidates
-                .filter(
-                    item =>
-                        player.knifeCount >
-                        item.player.knifeCount *
-                        1.15
-                )
-                .sort(
-                    (
-                        a,
-                        b
-                    ) => {
+        candidates =
+            opponents;
 
-                        if (
-                            a.player.knifeCount !==
-                            b.player.knifeCount
-                        ) {
-
-                            return (
-                                a.player.knifeCount -
-                                b.player.knifeCount
-                            );
-
-                        }
+    }
 
 
-                        return (
-                            a.distance -
-                            b.distance
-                        );
+    let best = null;
+    let bestScore = -Infinity;
 
-                    }
-                );
+
+    for (
+        const target of candidates
+    ) {
+
+        const distance =
+            distanceBetween(
+                player.x,
+                player.y,
+                target.x,
+                target.y
+            );
+
+
+        const targeters =
+            getTargeters(
+                target
+            );
+
+
+        let score = 0;
+
+
+        score +=
+            (
+                player.power -
+                target.power
+            ) * 10;
+
+
+        score -=
+            distance * 0.025;
+
+
+        score -=
+            targeters * 180;
 
 
         if (
-            weaker.length > 0
+            targeters >= 1 &&
+            player.power <
+            target.power * 2
         ) {
 
-            return (
-                weaker[0].player
-            );
+            score -= 500;
+
+        }
+
+
+        if (
+            score > bestScore
+        ) {
+
+            bestScore = score;
+            best = target;
 
         }
 
     }
 
 
-    // ================================================
-    // CASO CONTRÁRIO:
-    // MAIS PRÓXIMO
-    // ================================================
+    if (best) {
 
-    candidates.sort(
-        (
-            a,
-            b
-        ) =>
-            a.distance -
-            b.distance
-    );
+        player.targetId =
+            best.userId;
+
+    }
 
 
-    return candidates[0].player;
+    return best;
 
 }
 
 
-// ======================================================
-// IA
-// ======================================================
+// ============================================================
+// MODO DA IA
+// ============================================================
 
 function updateAI(
     player,
     delta
 ) {
 
-    if (
-        !player.alive
-    ) {
+    if (!player.alive) {
 
         return;
 
     }
 
 
-    player.aiTimer -=
-        delta;
+    player.aiTimer -= delta;
+
+
+    const currentTarget =
+        player.targetId
+            ? playerMap.get(
+                player.targetId
+            )
+            : null;
+
+
+    const targetInvalid =
+        !currentTarget ||
+        !currentTarget.alive ||
+        currentTarget === player ||
+        currentTarget.spawnProtectionMs > 0;
 
 
     if (
-        player.aiTimer > 0
+        targetInvalid ||
+        player.aiTimer <= 0
     ) {
 
-        return;
+        chooseTarget(player);
+
+        player.aiTimer =
+            Phaser.Math.Between(
+                700,
+                1300
+            );
 
     }
-
-
-    player.aiTimer =
-        Phaser.Math.Between(
-            300,
-            550
-        );
 
 
     const target =
-        chooseTarget(
-            player
-        );
+        player.targetId
+            ? playerMap.get(
+                player.targetId
+            )
+            : null;
 
 
     if (
-        !target
+        !target ||
+        !target.alive
     ) {
-
-        player.targetId =
-            null;
 
         player.aiMode =
             "wander";
@@ -2169,79 +1722,97 @@ function updateAI(
     }
 
 
-    player.targetId =
-        target.userId;
-
-
-    const own =
-        player.knifeCount;
-
-
-    const enemy =
-        target.knifeCount;
-
-
-    // ================================================
-    // SEM FACAS
-    // ================================================
-
     if (
-        own <= 0
-    ) {
-
-        player.aiMode =
-            "flee";
-
-    }
-
-
-    // ================================================
-    // MUITO MAIS FRACO
-    // ================================================
-
-    else if (
-        own <
-        enemy * 0.72
-    ) {
-
-        player.aiMode =
-            "flee";
-
-    }
-
-
-    // ================================================
-    // MAIS FORTE
-    // ================================================
-
-    else if (
-        own >
-        enemy * 1.20
+        player.power >=
+        target.power * 1.10
     ) {
 
         player.aiMode =
             "chase";
 
     }
-
-
-    // ================================================
-    // FORÇA PARECIDA
-    // ================================================
-
     else {
 
         player.aiMode =
-            "duel";
+            "flee";
 
     }
 
 }
 
 
-// ======================================================
+// ============================================================
+// WANDER
+// ============================================================
+
+function chooseWanderTarget(
+    player
+) {
+
+    const margin =
+        BORDER_MARGIN + 20;
+
+
+    player.targetX =
+        Phaser.Math.Between(
+            margin,
+            WIDTH - margin
+        );
+
+
+    player.targetY =
+        Phaser.Math.Between(
+            margin,
+            HEIGHT - margin
+        );
+
+
+    player.wanderTimer =
+        Phaser.Math.Between(
+            1400,
+            3000
+        );
+
+}
+
+
+// ============================================================
+// DIREÇÃO
+// ============================================================
+
+function getMovementDirection(
+    player
+) {
+
+    const dir =
+        normalizeVector(
+            player.lastMoveDirX,
+            player.lastMoveDirY
+        );
+
+
+    if (
+        Math.abs(dir.x) +
+        Math.abs(dir.y) >
+        0.01
+    ) {
+
+        return dir;
+
+    }
+
+
+    return {
+        x: 1,
+        y: 0
+    };
+
+}
+
+
+// ============================================================
 // MOVIMENTO
-// ======================================================
+// ============================================================
 
 function movePlayer(
     player,
@@ -2257,6 +1828,17 @@ function movePlayer(
     }
 
 
+    const dt =
+        Math.min(
+            delta,
+            50
+        ) / 1000;
+
+
+    let desiredX = 0;
+    let desiredY = 0;
+
+
     const target =
         player.targetId
             ? playerMap.get(
@@ -2265,71 +1847,281 @@ function movePlayer(
             : null;
 
 
-    // ================================================
-    // SEM ALVO
-    // ================================================
+    // ========================================================
+    // WANDER
+    // ========================================================
 
     if (
         !target ||
-        !target.alive ||
-        target.spawnProtectionMs > 0
+        !target.alive
     ) {
 
-        player.targetId =
-            null;
-
-
-        player.aiMode =
-            "wander";
-
-
-        player.moveTimer -=
+        player.wanderTimer -=
             delta;
 
 
         if (
-            player.moveTimer <= 0
+            player.wanderTimer <= 0 ||
+            distanceBetween(
+                player.x,
+                player.y,
+                player.targetX,
+                player.targetY
+            ) < 35
         ) {
 
-            player.targetX =
-                Phaser.Math.Between(
-                    70,
-                    WIDTH - 70
+            chooseWanderTarget(
+                player
+            );
+
+        }
+
+
+        const wander =
+            normalizeVector(
+                player.targetX -
+                player.x,
+                player.targetY -
+                player.y
+            );
+
+
+        desiredX =
+            wander.x;
+
+        desiredY =
+            wander.y;
+
+    }
+
+
+    // ========================================================
+    // FRACO = FUGIR
+    // ========================================================
+
+    else if (
+        player.aiMode ===
+        "flee"
+    ) {
+
+        const away =
+            normalizeVector(
+                player.x -
+                target.x,
+                player.y -
+                target.y
+            );
+
+
+        const side = {
+            x:
+                -away.y *
+                player.fleeSide,
+
+            y:
+                away.x *
+                player.fleeSide
+        };
+
+
+        const flee =
+            normalizeVector(
+                away.x * 0.78 +
+                side.x * 0.32,
+
+                away.y * 0.78 +
+                side.y * 0.32
+            );
+
+
+        desiredX =
+            flee.x;
+
+        desiredY =
+            flee.y;
+
+    }
+
+
+    // ========================================================
+    // FORTE = FICAR ATRÁS
+    // ========================================================
+
+    else {
+
+        const targetDir =
+            getMovementDirection(
+                target
+            );
+
+
+        const sideX =
+            -targetDir.y *
+            player.behindSide;
+
+        const sideY =
+            targetDir.x *
+            player.behindSide;
+
+
+        const desiredTargetX =
+            target.x -
+            targetDir.x *
+            BEHIND_DISTANCE +
+            sideX *
+            BEHIND_SIDE_OFFSET;
+
+
+        const desiredTargetY =
+            target.y -
+            targetDir.y *
+            BEHIND_DISTANCE +
+            sideY *
+            BEHIND_SIDE_OFFSET;
+
+
+        const toBehind =
+            normalizeVector(
+                desiredTargetX -
+                player.x,
+
+                desiredTargetY -
+                player.y
+            );
+
+
+        const distanceToTarget =
+            distanceBetween(
+                player.x,
+                player.y,
+                target.x,
+                target.y
+            );
+
+
+        if (
+            Math.abs(
+                distanceToTarget -
+                BEHIND_DISTANCE
+            ) < 35
+        ) {
+
+            const follow =
+                normalizeVector(
+                    targetDir.x * 0.85 +
+                    sideX * 0.22,
+
+                    targetDir.y * 0.85 +
+                    sideY * 0.22
                 );
 
 
-            player.targetY =
-                Phaser.Math.Between(
-                    90,
-                    HEIGHT - 70
+            desiredX =
+                follow.x;
+
+            desiredY =
+                follow.y;
+
+        }
+
+        else {
+
+            desiredX =
+                toBehind.x;
+
+            desiredY =
+                toBehind.y;
+
+        }
+
+
+        const relativeX =
+            player.x -
+            target.x;
+
+        const relativeY =
+            player.y -
+            target.y;
+
+
+        const frontness =
+            relativeX *
+            targetDir.x +
+            relativeY *
+            targetDir.y;
+
+
+        if (
+            frontness > 10 &&
+            distanceToTarget <
+            BEHIND_DISTANCE + 60
+        ) {
+
+            const around =
+                normalizeVector(
+                    sideX * 0.9 -
+                    targetDir.x * 0.15,
+
+                    sideY * 0.9 -
+                    targetDir.y * 0.15
                 );
 
 
-            player.moveTimer =
-                Phaser.Math.Between(
-                    900,
-                    2200
-                );
+            desiredX =
+                around.x;
+
+            desiredY =
+                around.y;
 
         }
 
     }
 
 
-    // ================================================
-    // COM ALVO
-    // ================================================
+    // ========================================================
+    // SEPARAÇÃO DURANTE MOVIMENTO
+    // ========================================================
 
-    else {
+    const nearbyRadius =
+        Math.max(
+            MIN_PLAYER_DISTANCE + 35,
+            250
+        );
+
+
+    const nearby =
+        getPlayersNearPosition(
+            player.x,
+            player.y,
+            nearbyRadius
+        );
+
+
+    let separationX = 0;
+    let separationY = 0;
+
+
+    for (
+        const other of nearby
+    ) {
+
+        if (
+            other === player ||
+            !other.alive
+        ) {
+
+            continue;
+
+        }
+
 
         const dx =
-            target.x -
-            player.x;
-
+            player.x -
+            other.x;
 
         const dy =
-            target.y -
-            player.y;
+            player.y -
+            other.y;
 
 
         const distance =
@@ -2339,215 +2131,519 @@ function movePlayer(
             );
 
 
-        // ============================================
-        // FUGIR
-        // ============================================
-
         if (
-            player.aiMode ===
-            "flee"
+            distance < 0.001
         ) {
 
-            if (
-                distance > 0
-            ) {
-
-                player.targetX =
-                    player.x -
-                    (
-                        dx /
-                        distance
-                    ) *
-                    260;
-
-
-                player.targetY =
-                    player.y -
-                    (
-                        dy /
-                        distance
-                    ) *
-                    260;
-
-            }
+            continue;
 
         }
 
 
-        // ============================================
-        // PERSEGUIR
-        // ============================================
-
-        else if (
-            player.aiMode ===
-            "chase"
-        ) {
-
-            player.targetX =
-                target.x;
+        const playerTargetingOther =
+            player.targetId ===
+            other.userId;
 
 
-            player.targetY =
-                target.y;
+        const otherTargetingPlayer =
+            other.targetId ===
+            player.userId;
+
+
+        const isCombatPair =
+            playerTargetingOther ||
+            otherTargetingPlayer;
+
+
+        let requiredDistance;
+
+
+        if (isCombatPair) {
+
+            // Durante uma luta:
+            // as facas podem chegar uma na outra,
+            // mas os corpos nunca se atravessam.
+            requiredDistance =
+                (
+                    PLAYER_RADIUS * 2
+                ) +
+                COMBAT_BODY_GAP;
 
         }
-
-
-        // ============================================
-        // DUELO
-        // ============================================
-
         else {
 
-            const desiredDistance =
-                getOrbitRadius(
+            // Fora de combate:
+            // respeita o espaço completo das facas.
+            requiredDistance =
+                getPlayerSpaceRadius(
                     player
                 ) +
-                18;
+                getPlayerSpaceRadius(
+                    other
+                );
+
+        }
 
 
-            if (
-                distance >
-                desiredDistance
-            ) {
+        if (
+            distance <
+            requiredDistance
+        ) {
 
-                player.targetX =
-                    target.x;
-
-
-                player.targetY =
-                    target.y;
-
-            }
-            else {
-
-                const angle =
-                    Math.atan2(
-                        dy,
-                        dx
-                    );
+            const strength =
+                (
+                    requiredDistance -
+                    distance
+                ) /
+                requiredDistance;
 
 
-                const sideAngle =
-                    angle +
-                    Math.PI / 2;
+            separationX +=
+                (
+                    dx / distance
+                ) *
+                strength;
 
-
-                player.targetX =
-                    target.x +
-                    Math.cos(
-                        sideAngle
-                    ) *
-                    65;
-
-
-                player.targetY =
-                    target.y +
-                    Math.sin(
-                        sideAngle
-                    ) *
-                    65;
-
-            }
+            separationY +=
+                (
+                    dy / distance
+                ) *
+                strength;
 
         }
 
     }
 
 
-    // ================================================
-    // MOVIMENTO
-    // ================================================
-
-    const dx =
-        player.targetX -
-        player.x;
+    desiredX +=
+        separationX *
+        SEPARATION_FORCE;
 
 
-    const dy =
-        player.targetY -
-        player.y;
+    desiredY +=
+        separationY *
+        SEPARATION_FORCE;
 
 
-    const distance =
-        Math.sqrt(
-            dx * dx +
-            dy * dy
+    // ========================================================
+    // BORDA
+    // ========================================================
+
+    let borderX = 0;
+    let borderY = 0;
+
+
+    const borderSpace =
+        Math.min(
+            BORDER_MARGIN,
+            getPlayerSpaceRadius(
+                player
+            )
         );
 
 
     if (
-        distance < 1
+        player.x <
+        borderSpace
     ) {
 
-        return;
+        borderX +=
+            (
+                borderSpace -
+                player.x
+            ) /
+            borderSpace;
 
     }
 
 
-    const speed =
-        player.knifeCount <= 0
+    if (
+        player.x >
+        WIDTH -
+        borderSpace
+    ) {
 
-            ? 0.60
+        borderX -=
+            (
+                player.x -
+                (
+                    WIDTH -
+                    borderSpace
+                )
+            ) /
+            borderSpace;
 
-            : Math.min(
-                1.25,
-                0.68 +
-                Math.sqrt(
-                    player.knifeCount
-                ) *
-                0.015
-            );
+    }
+
+
+    if (
+        player.y <
+        borderSpace
+    ) {
+
+        borderY +=
+            (
+                borderSpace -
+                player.y
+            ) /
+            borderSpace;
+
+    }
+
+
+    if (
+        player.y >
+        HEIGHT -
+        borderSpace
+    ) {
+
+        borderY -=
+            (
+                player.y -
+                (
+                    HEIGHT -
+                    borderSpace
+                )
+            ) /
+            borderSpace;
+
+    }
+
+
+    desiredX +=
+        borderX * 2.2;
+
+
+    desiredY +=
+        borderY * 2.2;
+
+
+    const movement =
+        normalizeVector(
+            desiredX,
+            desiredY
+        );
+
+
+    let speed =
+        Phaser.Math.Clamp(
+            player.moveSpeed ||
+            MIN_MOVE_SPEED,
+            MIN_MOVE_SPEED,
+            MAX_MOVE_SPEED
+        );
+
+
+    if (
+        player.aiMode ===
+        "flee"
+    ) {
+
+        speed =
+            FLEE_SPEED;
+
+    }
+    else if (
+        player.aiMode ===
+        "chase"
+    ) {
+
+        speed =
+            CHASE_SPEED;
+
+    }
 
 
     player.x +=
-        (
-            dx /
-            distance
-        ) *
-        speed;
+        movement.x *
+        speed *
+        dt;
 
 
     player.y +=
-        (
-            dy /
-            distance
-        ) *
-        speed;
+        movement.y *
+        speed *
+        dt;
 
 
-    // ================================================
+    if (
+        Math.abs(movement.x) +
+        Math.abs(movement.y) >
+        0.05
+    ) {
+
+        player.lastMoveDirX =
+            movement.x;
+
+        player.lastMoveDirY =
+            movement.y;
+
+    }
+
+
+    // ========================================================
     // LIMITES
-    // ================================================
+    // ========================================================
 
     player.x =
         Phaser.Math.Clamp(
             player.x,
-            45,
-            WIDTH - 45
+            PLAYER_RADIUS + 5,
+            WIDTH -
+            PLAYER_RADIUS -
+            5
         );
 
 
     player.y =
         Phaser.Math.Clamp(
             player.y,
-            70,
-            HEIGHT - 45
+            PLAYER_RADIUS + 5,
+            HEIGHT -
+            PLAYER_RADIUS -
+            5
         );
 
 }
 
 
-// ======================================================
-// ATAQUE
-// ======================================================
+// ============================================================
+// RESOLVER SOBREPOSIÇÃO
+// ============================================================
 
-function tryAttack(
-    player
+function resolveAllPlayerOverlaps() {
+
+    for (
+        let pass = 0;
+        pass < 3;
+        pass++
+    ) {
+
+        rebuildSpatialGrid();
+
+
+        for (
+            const player of players
+        ) {
+
+            if (
+                !player.alive
+            ) {
+
+                continue;
+
+            }
+
+
+            const nearby =
+                getPlayersNearPosition(
+                    player.x,
+                    player.y,
+                    300
+                );
+
+
+            for (
+                const other of nearby
+            ) {
+
+                if (
+                    other === player ||
+                    !other.alive
+                ) {
+
+                    continue;
+
+                }
+
+
+                if (
+                    player.sequence >=
+                    other.sequence
+                ) {
+
+                    continue;
+
+                }
+
+
+                let dx =
+                    player.x -
+                    other.x;
+
+                let dy =
+                    player.y -
+                    other.y;
+
+
+                let distance =
+                    Math.sqrt(
+                        dx * dx +
+                        dy * dy
+                    );
+
+
+                if (
+                    distance < 0.001
+                ) {
+
+                    const angle =
+                        Math.random() *
+                        Math.PI *
+                        2;
+
+                    dx =
+                        Math.cos(angle);
+
+                    dy =
+                        Math.sin(angle);
+
+                    distance = 1;
+
+                }
+
+
+                const playerTargetingOther =
+                    player.targetId ===
+                    other.userId;
+
+
+                const otherTargetingPlayer =
+                    other.targetId ===
+                    player.userId;
+
+
+                const isCombatPair =
+                    playerTargetingOther ||
+                    otherTargetingPlayer;
+
+
+                let requiredDistance;
+
+
+                if (isCombatPair) {
+
+                    // Em combate, permite que as facas
+                    // se alcancem, mas os corpos não.
+                    requiredDistance =
+                        (
+                            PLAYER_RADIUS * 2
+                        ) +
+                        COMBAT_BODY_GAP;
+
+                }
+                else {
+
+                    // Fora de combate, respeita
+                    // o espaço total das facas.
+                    requiredDistance =
+                        getPlayerSpaceRadius(
+                            player
+                        ) +
+                        getPlayerSpaceRadius(
+                            other
+                        );
+
+                }
+
+
+                if (
+                    distance <
+                    requiredDistance
+                ) {
+
+                    const overlap =
+                        requiredDistance -
+                        distance;
+
+
+                    const nx =
+                        dx / distance;
+
+                    const ny =
+                        dy / distance;
+
+
+                    const push =
+                        overlap * 0.5;
+
+
+                    player.x +=
+                        nx * push;
+
+                    player.y +=
+                        ny * push;
+
+
+                    other.x -=
+                        nx * push;
+
+                    other.y -=
+                        ny * push;
+
+
+                    player.x =
+                        Phaser.Math.Clamp(
+                            player.x,
+                            PLAYER_RADIUS + 5,
+                            WIDTH -
+                            PLAYER_RADIUS -
+                            5
+                        );
+
+
+                    player.y =
+                        Phaser.Math.Clamp(
+                            player.y,
+                            PLAYER_RADIUS + 5,
+                            HEIGHT -
+                            PLAYER_RADIUS -
+                            5
+                        );
+
+
+                    other.x =
+                        Phaser.Math.Clamp(
+                            other.x,
+                            PLAYER_RADIUS + 5,
+                            WIDTH -
+                            PLAYER_RADIUS -
+                            5
+                        );
+
+
+                    other.y =
+                        Phaser.Math.Clamp(
+                            other.y,
+                            PLAYER_RADIUS + 5,
+                            HEIGHT -
+                            PLAYER_RADIUS -
+                            5
+                        );
+
+                }
+
+            }
+
+        }
+
+    }
+
+}
+
+
+// ============================================================
+// ROTAÇÃO DAS FACAS
+// ============================================================
+
+function updateRotation(
+    player,
+    delta
 ) {
 
     if (
-        !player.alive
+        !player.alive ||
+        player.knifeCount <= 0
     ) {
 
         return;
@@ -2555,11 +2651,421 @@ function tryAttack(
     }
 
 
+    player.rotationAngle +=
+        player.rotationSpeed *
+        (
+            delta /
+            16.6667
+        );
+
+
+    // Pode acontecer de o frame ser grande.
+    while (
+        player.rotationAngle >=
+        Math.PI * 2
+    ) {
+
+        player.rotationAngle -=
+            Math.PI * 2;
+
+        player.rotationTurns++;
+
+    }
+
+
+    // ========================================================
+    // EXATAMENTE 3 ROTAÇÕES = -10 MOEDAS
+    // ========================================================
+
     if (
+        player.rotationTurns >=
+        ROTATIONS_PER_COIN_DAMAGE
+    ) {
+
+        tryAttack(
+            player
+        );
+
+        // IMPORTANTE:
+        // sempre zera depois da terceira volta.
+        //
+        // Não fica:
+        // 3 -> 2 -> 2 -> 2
+        //
+        // Agora:
+        // 0 -> 1 -> 2 -> 3 -> ATAQUE -> 0
+        player.rotationTurns = 0;
+
+    }
+
+}
+
+
+// ============================================================
+// CALCULAR PONTOS DA FACA
+// ============================================================
+
+function getKnifePoints(
+    player,
+    index
+) {
+
+    if (
+        !player ||
         player.knifeCount <= 0
     ) {
 
-        return;
+        return null;
+
+    }
+
+
+    const count =
+        Math.min(
+            player.knifeCount,
+            MAX_VISUAL_KNIVES
+        );
+
+
+    if (count <= 0) {
+
+        return null;
+
+    }
+
+
+    const spacing =
+        Math.PI * 2 /
+        count;
+
+
+    const angle =
+        player.rotationAngle +
+        spacing * index;
+
+
+    const baseX =
+        player.x +
+        Math.cos(angle) *
+        getOrbitRadius(player);
+
+
+    const baseY =
+        player.y +
+        Math.sin(angle) *
+        getOrbitRadius(player);
+
+
+    const tipX =
+        baseX +
+        Math.cos(angle) *
+        KNIFE_LENGTH;
+
+
+    const tipY =
+        baseY +
+        Math.sin(angle) *
+        KNIFE_LENGTH;
+
+
+    return {
+
+        baseX,
+        baseY,
+        tipX,
+        tipY,
+        angle
+
+    };
+
+}
+
+
+// ============================================================
+// DISTÂNCIA ENTRE SEGMENTOS
+// ============================================================
+
+function pointToSegmentDistance(
+    px,
+    py,
+    x1,
+    y1,
+    x2,
+    y2
+) {
+
+    const dx =
+        x2 - x1;
+
+    const dy =
+        y2 - y1;
+
+
+    const lengthSquared =
+        dx * dx +
+        dy * dy;
+
+
+    if (
+        lengthSquared <=
+        0.000001
+    ) {
+
+        return distanceBetween(
+            px,
+            py,
+            x1,
+            y1
+        );
+
+    }
+
+
+    let t =
+        (
+            (px - x1) * dx +
+            (py - y1) * dy
+        ) /
+        lengthSquared;
+
+
+    t =
+        clamp(
+            t,
+            0,
+            1
+        );
+
+
+    const closestX =
+        x1 +
+        t * dx;
+
+
+    const closestY =
+        y1 +
+        t * dy;
+
+
+    return distanceBetween(
+        px,
+        py,
+        closestX,
+        closestY
+    );
+
+}
+
+
+// ============================================================
+// COLISÃO ENTRE DUAS FACAS
+// ============================================================
+
+function knifeSegmentsTouch(
+    knifeA,
+    knifeB
+) {
+
+    if (
+        !knifeA ||
+        !knifeB
+    ) {
+
+        return false;
+
+    }
+
+
+    const tolerance =
+        TOOL_HIT_GAP;
+
+
+    const aToB =
+        pointToSegmentDistance(
+            knifeA.baseX,
+            knifeA.baseY,
+            knifeB.baseX,
+            knifeB.baseY,
+            knifeB.tipX,
+            knifeB.tipY
+        );
+
+
+    if (
+        aToB <= tolerance
+    ) {
+
+        return true;
+
+    }
+
+
+    const aTipToB =
+        pointToSegmentDistance(
+            knifeA.tipX,
+            knifeA.tipY,
+            knifeB.baseX,
+            knifeB.baseY,
+            knifeB.tipX,
+            knifeB.tipY
+        );
+
+
+    if (
+        aTipToB <= tolerance
+    ) {
+
+        return true;
+
+    }
+
+
+    const bToA =
+        pointToSegmentDistance(
+            knifeB.baseX,
+            knifeB.baseY,
+            knifeA.baseX,
+            knifeA.baseY,
+            knifeA.tipX,
+            knifeA.tipY
+        );
+
+
+    if (
+        bToA <= tolerance
+    ) {
+
+        return true;
+
+    }
+
+
+    const bTipToA =
+        pointToSegmentDistance(
+            knifeB.tipX,
+            knifeB.tipY,
+            knifeA.baseX,
+            knifeA.baseY,
+            knifeA.tipX,
+            knifeA.tipY
+        );
+
+
+    return (
+        bTipToA <= tolerance
+    );
+
+}
+
+
+// ============================================================
+// VERIFICAR SE AS FACAS PODEM ATINGIR
+// ============================================================
+
+function weaponsCanHit(
+    attacker,
+    target
+) {
+
+    if (
+        !attacker ||
+        !target ||
+        attacker.knifeCount <= 0 ||
+        target.knifeCount <= 0
+    ) {
+
+        return false;
+
+    }
+
+
+    const attackerCount =
+        Math.min(
+            attacker.knifeCount,
+            MAX_VISUAL_KNIVES
+        );
+
+
+    const targetCount =
+        Math.min(
+            target.knifeCount,
+            MAX_VISUAL_KNIVES
+        );
+
+
+    for (
+        let i = 0;
+        i < attackerCount;
+        i++
+    ) {
+
+        const attackerKnife =
+            getKnifePoints(
+                attacker,
+                i
+            );
+
+
+        if (!attackerKnife) {
+
+            continue;
+
+        }
+
+
+        for (
+            let j = 0;
+            j < targetCount;
+            j++
+        ) {
+
+            const targetKnife =
+                getKnifePoints(
+                    target,
+                    j
+                );
+
+
+            if (!targetKnife) {
+
+                continue;
+
+            }
+
+
+            if (
+                knifeSegmentsTouch(
+                    attackerKnife,
+                    targetKnife
+                )
+            ) {
+
+                return true;
+
+            }
+
+        }
+
+    }
+
+
+    return false;
+
+}
+
+
+// ============================================================
+// ATAQUE
+// ============================================================
+
+function tryAttack(player) {
+
+    if (
+        !player.alive ||
+        player.knifeCount <= 0
+    ) {
+
+        return false;
 
     }
 
@@ -2577,20 +3083,49 @@ function tryAttack(
         !target.alive
     ) {
 
-        return;
+        return false;
 
     }
 
-
-    // Novo jogador protegido
 
     if (
-        target.spawnProtectionMs > 0
+        target.spawnProtectionMs >
+        0
     ) {
 
-        return;
+        return false;
 
     }
+
+
+    // ========================================================
+    // SOMENTE O MAIS FORTE PODE ATACAR
+    // ========================================================
+
+    if (
+        player.power <=
+        target.power
+    ) {
+
+        return false;
+
+    }
+
+
+    // ========================================================
+    // DISTÂNCIA MÁXIMA POSSÍVEL DAS ARMAS
+    // ========================================================
+
+    const attackerReach =
+        getPlayerWeaponReach(
+            player
+        );
+
+
+    const targetReach =
+        getPlayerWeaponReach(
+            target
+        );
 
 
     const distance =
@@ -2602,183 +3137,83 @@ function tryAttack(
         );
 
 
-    const orbitRadius =
-        getOrbitRadius(
-            player
-        );
+    const maximumWeaponDistance =
+        attackerReach +
+        targetReach +
+        TOOL_HIT_GAP;
 
-
-    // ================================================
-    // ALVO PRÓXIMO DO CÍRCULO DAS FACAS
-    // ================================================
 
     if (
-        Math.abs(
-            distance -
-            orbitRadius
-        ) > 30
+        distance >
+        maximumWeaponDistance
     ) {
 
-        return;
+        return false;
 
     }
 
 
-    // ================================================
-    // DIREÇÃO DO ALVO
-    // ================================================
+    // ========================================================
+    // CONFIRMA SE EXISTE CONTATO REAL ENTRE FACAS
+    // ========================================================
 
-    const targetAngle =
-        Math.atan2(
-            target.y -
-            player.y,
+    if (
+        !weaponsCanHit(
+            player,
+            target
+        )
+    ) {
 
-            target.x -
-            player.x
+        return false;
+
+    }
+
+
+    // ========================================================
+    // -10 MOEDAS
+    // ========================================================
+
+    const oldCoins =
+        target.coins;
+
+
+    const damage =
+        Math.min(
+            COINS_PER_ATTACK,
+            target.coins
         );
 
 
-    // ================================================
-    // FACAS
-    // ================================================
-
-    const knifeSpacing =
-        (
-            Math.PI * 2
-        ) /
-        player.knifeCount;
-
-
-    const relativeAngle =
-        (
-            targetAngle -
-            player.rotationAngle +
-            Math.PI * 2
-        ) %
-        (
-            Math.PI * 2
+    target.coins =
+        Math.max(
+            0,
+            target.coins -
+            damage
         );
 
 
-    const closestIndex =
-        Math.round(
-            relativeAngle /
-            knifeSpacing
+    target.knifeCount =
+        calculateKnifeCount(
+            target.coins
         );
 
 
-    const closestKnifeAngle =
-        player.rotationAngle +
-        closestIndex *
-        knifeSpacing;
+    target.power =
+        calculatePower(
+            target.knifeCount
+        );
 
 
-    const angularDifference =
-        Math.abs(
-            normalizeAngle(
-                targetAngle -
-                closestKnifeAngle
+    // Mantém HP apenas como indicador visual.
+    target.hp =
+        target.maxHp *
+        (
+            target.coins /
+            Math.max(
+                oldCoins,
+                1
             )
         );
-
-
-    const tangentialDistance =
-        orbitRadius *
-        angularDifference;
-
-
-    if (
-        tangentialDistance > 24
-    ) {
-
-        return;
-
-    }
-
-
-    // ==================================================
-    // DANO
-    // ==================================================
-    //
-    // Cresce lentamente com as facas.
-    //
-    // Isso evita mortes instantâneas.
-    //
-    // ==================================================
-
-    const scaledPower =
-        Math.log2(
-            player.knifeCount +
-            1
-        );
-
-
-    let damage =
-        3 +
-        Math.floor(
-            scaledPower *
-            1.35
-        ) +
-        Phaser.Math.Between(
-            0,
-            2
-        );
-
-
-    // ================================================
-    // MUITO MAIS FRACO
-    // ================================================
-
-    const ratio =
-        player.power /
-        Math.max(
-            target.power,
-            1
-        );
-
-
-    if (
-        ratio < 0.55
-    ) {
-
-        damage =
-            Math.max(
-                2,
-                Math.floor(
-                    damage *
-                    0.70
-                )
-            );
-
-    }
-
-
-    // ================================================
-    // REDUÇÃO SE TOMOU HIT RECENTE
-    // ================================================
-
-    if (
-        target.recentHitMs > 0
-    ) {
-
-        damage =
-            Math.max(
-                1,
-                Math.floor(
-                    damage *
-                    0.80
-                )
-            );
-
-    }
-
-
-    // ================================================
-    // APLICAR
-    // ================================================
-
-    target.hp -=
-        damage;
 
 
     target.hp =
@@ -2789,28 +3224,34 @@ function tryAttack(
 
 
     target.recentHitMs =
-        220;
+        180;
 
 
-    // ================================================
-    // EFEITO
-    // ================================================
+    // ========================================================
+    // EFEITO DE ACERTO
+    // ========================================================
 
-    target.avatarText.setScale(
-        1.10
-    );
+    if (
+        target.avatarText
+    ) {
+
+        target.avatarText.setScale(
+            1.15
+        );
 
 
-    scene.tweens.add({
+        scene.tweens.add({
 
-        targets:
-            target.avatarText,
+            targets:
+                target.avatarText,
 
-        scale: 1,
+            scale: 1,
 
-        duration: 110
+            duration: 100
 
-    });
+        });
+
+    }
 
 
     showBattleMessage(
@@ -2820,16 +3261,25 @@ function tryAttack(
         target.name +
         " (-" +
         damage +
-        ")"
+        " 🪙)"
     );
 
 
-    // ================================================
+    updatePlayerVisuals(
+        target,
+        0
+    );
+
+
+    updatePlayersList();
+
+
+    // ========================================================
     // MORTE
-    // ================================================
+    // ========================================================
 
     if (
-        target.hp <= 0
+        target.coins <= 0
     ) {
 
         eliminatePlayer(
@@ -2839,12 +3289,15 @@ function tryAttack(
 
     }
 
+
+    return true;
+
 }
 
 
-// ======================================================
+// ============================================================
 // ELIMINAR
-// ======================================================
+// ============================================================
 
 function eliminatePlayer(
     target,
@@ -2860,92 +3313,103 @@ function eliminatePlayer(
     }
 
 
-    target.alive =
-        false;
+    target.alive = false;
+
+    target.hp = 0;
+
+    target.targetId = null;
 
 
-    target.targetId =
-        null;
+    if (attacker) {
+
+        attacker.kills++;
+
+    }
 
 
-    // ================================================
-    // KILL
-    // ================================================
+    // Todos que estavam atacando o morto
+    // precisam procurar outro alvo.
+    for (
+        const player of players
+    ) {
 
-    attacker.kills++;
+        if (
+            player.targetId ===
+            target.userId
+        ) {
 
+            player.targetId = null;
 
-    // ================================================
-    // MENSAGEM
-    // ================================================
+            player.aiTimer = 0;
+
+        }
+
+    }
+
 
     showBattleMessage(
         "💀 " +
         target.name +
-        " foi eliminado por " +
-        attacker.name +
-        "!"
+        " foi eliminado!"
     );
 
 
-    // ================================================
-    // VISUAL
-    // ================================================
+    const objects = [
 
-    target.avatarText.setAlpha(
-        0.25
-    );
+        target.aura,
+        target.avatarText,
+        target.nameText,
+        target.coinText,
+        target.knifeText,
+        target.killText,
+        target.hpBackground,
+        target.hpBar
 
-
-    target.nameText.setAlpha(
-        0.25
-    );
-
-
-    target.coinText.setAlpha(
-        0.25
-    );
+    ];
 
 
-    target.knifeText.setAlpha(
-        0.25
-    );
+    for (
+        const object of objects
+    ) {
 
+        if (
+            object
+        ) {
 
-    target.killText.setAlpha(
-        0.25
-    );
+            scene.tweens.add({
 
+                targets:
+                    object,
 
-    target.hpBackground.setAlpha(
-        0.25
-    );
+                alpha: 0,
 
+                duration: 300
 
-    target.hpBar.setAlpha(
-        0.25
-    );
+            });
 
+        }
 
-    target.aura.setAlpha(
-        0.15
-    );
+    }
 
 
     updatePlayersList();
 
+
+    setTimeout(
+        checkWinner,
+        50
+    );
+
 }
 
 
-// ======================================================
+// ============================================================
 // DESENHAR FACAS
-// ======================================================
+// ============================================================
 
 function drawAllWeapons() {
 
-    if (
-        !weaponGraphics
-    ) {
+    if (!weaponGraphics) {
 
         return;
 
@@ -2955,76 +3419,13 @@ function drawAllWeapons() {
     weaponGraphics.clear();
 
 
-    const alive =
-        players.filter(
-            player =>
-                player.alive
-        );
-
-
-    const aliveCount =
-        alive.length;
-
-
     for (
-        const player
-        of alive
+        const player of players
     ) {
 
-        let visualLimit =
-            MAX_VISUAL_KNIVES;
-
-
-        // ==========================================
-        // REDUÇÃO PARA GRANDES ARENAS
-        // ==========================================
-
         if (
-            aliveCount > 1000
-        ) {
-
-            visualLimit = 2;
-
-        }
-        else if (
-            aliveCount > 500
-        ) {
-
-            visualLimit = 3;
-
-        }
-        else if (
-            aliveCount > 250
-        ) {
-
-            visualLimit = 4;
-
-        }
-        else if (
-            aliveCount > 100
-        ) {
-
-            visualLimit = 6;
-
-        }
-        else if (
-            aliveCount > 50
-        ) {
-
-            visualLimit = 12;
-
-        }
-
-
-        const visualCount =
-            Math.min(
-                player.knifeCount,
-                visualLimit
-            );
-
-
-        if (
-            visualCount <= 0
+            !player.alive ||
+            player.knifeCount <= 0
         ) {
 
             continue;
@@ -3032,130 +3433,61 @@ function drawAllWeapons() {
         }
 
 
-        const radius =
-            getOrbitRadius(
-                player
+        const count =
+            Math.min(
+                player.knifeCount,
+                MAX_VISUAL_KNIVES
             );
-
-
-        const spacing =
-            (
-                Math.PI * 2
-            ) /
-            visualCount;
 
 
         for (
             let i = 0;
-            i < visualCount;
+            i < count;
             i++
         ) {
 
-            const angle =
-                player.rotationAngle +
-                spacing *
-                i;
-
-
-            const bladeLength =
-                14 +
-                Math.min(
-                    10,
-                    Math.sqrt(
-                        player.knifeCount
-                    )
+            const knife =
+                getKnifePoints(
+                    player,
+                    i
                 );
 
 
-            const innerRadius =
-                radius - 7;
+            if (!knife) {
 
+                continue;
 
-            const outerRadius =
-                radius +
-                bladeLength;
+            }
 
-
-            const x1 =
-                player.x +
-                Math.cos(
-                    angle
-                ) *
-                innerRadius;
-
-
-            const y1 =
-                player.y +
-                Math.sin(
-                    angle
-                ) *
-                innerRadius;
-
-
-            const x2 =
-                player.x +
-                Math.cos(
-                    angle
-                ) *
-                outerRadius;
-
-
-            const y2 =
-                player.y +
-                Math.sin(
-                    angle
-                ) *
-                outerRadius;
-
-
-            // ========================================
-            // CABO
-            // ========================================
 
             weaponGraphics.lineStyle(
-                4,
-                0x303030,
+                3,
+                player.color,
                 1
             );
 
 
-            weaponGraphics.beginPath();
-
-
-            weaponGraphics.moveTo(
-                x1,
-                y1
+            weaponGraphics.lineBetween(
+                knife.baseX,
+                knife.baseY,
+                knife.tipX,
+                knife.tipY
             );
 
 
-            weaponGraphics.lineTo(
-                player.x +
+            const sideX =
+                -Math.sin(
+                    knife.angle
+                ) * 5;
+
+
+            const sideY =
                 Math.cos(
-                    angle
-                ) *
-                (
-                    radius + 2
-                ),
-
-                player.y +
-                Math.sin(
-                    angle
-                ) *
-                (
-                    radius + 2
-                )
-            );
+                    knife.angle
+                ) * 5;
 
 
-            weaponGraphics.strokePath();
-
-
-            // ========================================
-            // LÂMINA
-            // ========================================
-
-            weaponGraphics.lineStyle(
-                5,
+            weaponGraphics.fillStyle(
                 player.color,
                 1
             );
@@ -3165,48 +3497,44 @@ function drawAllWeapons() {
 
 
             weaponGraphics.moveTo(
-                player.x +
-                Math.cos(
-                    angle
-                ) *
-                (
-                    radius + 1
-                ),
-
-                player.y +
-                Math.sin(
-                    angle
-                ) *
-                (
-                    radius + 1
-                )
+                knife.tipX,
+                knife.tipY
             );
 
 
             weaponGraphics.lineTo(
-                x2,
-                y2
+                knife.tipX -
+                Math.cos(
+                    knife.angle
+                ) * 9 +
+                sideX,
+
+                knife.tipY -
+                Math.sin(
+                    knife.angle
+                ) * 9 +
+                sideY
             );
 
 
-            weaponGraphics.strokePath();
+            weaponGraphics.lineTo(
+                knife.tipX -
+                Math.cos(
+                    knife.angle
+                ) * 9 -
+                sideX,
 
-
-            // ========================================
-            // PONTA
-            // ========================================
-
-            weaponGraphics.fillStyle(
-                0xffffff,
-                0.95
+                knife.tipY -
+                Math.sin(
+                    knife.angle
+                ) * 9 -
+                sideY
             );
 
 
-            weaponGraphics.fillCircle(
-                x2,
-                y2,
-                2
-            );
+            weaponGraphics.closePath();
+
+            weaponGraphics.fillPath();
 
         }
 
@@ -3215,137 +3543,207 @@ function drawAllWeapons() {
 }
 
 
-// ======================================================
-// VISUAL DO JOGADOR
-// ======================================================
+// ============================================================
+// VISUAL DO PLAYER
+// ============================================================
 
 function updatePlayerVisuals(
     player,
     delta
 ) {
 
-    player.aura.setPosition(
-        player.x,
-        player.y
-    );
+    if (!player) {
 
+        return;
 
-    player.avatarText.setPosition(
-        player.x,
-        player.y
-    );
+    }
 
-
-    player.nameText.setPosition(
-        player.x,
-        player.y - 45
-    );
-
-
-    player.coinText.setPosition(
-        player.x,
-        player.y + 44
-    );
-
-
-    player.coinText.setText(
-        "🪙 " +
-        player.coins
-    );
-
-
-    player.knifeText.setPosition(
-        player.x,
-        player.y + 58
-    );
-
-
-    player.knifeText.setText(
-        "🔪 " +
-        player.knifeCount
-    );
-
-
-    player.killText.setPosition(
-        player.x,
-        player.y + 72
-    );
-
-
-    player.killText.setText(
-        "💀 " +
-        player.kills
-    );
-
-
-    player.hpBackground.setPosition(
-        player.x,
-        player.y + 34
-    );
-
-
-    player.hpBar.setPosition(
-        player.x - 30,
-        player.y + 34
-    );
-
-
-    player.hpBar.width =
-        60 *
-        (
-            player.hp /
-            player.maxHp
-        );
-
-
-    // ================================================
-    // HIT RECENTE
-    // ================================================
 
     if (
         player.recentHitMs > 0
     ) {
 
-        player.recentHitMs =
-            Math.max(
-                0,
-                player.recentHitMs -
-                delta
-            );
+        player.recentHitMs -=
+            delta;
 
     }
 
-
-    // ================================================
-    // PROTEÇÃO
-    // ================================================
 
     if (
         player.spawnProtectionMs > 0
     ) {
 
-        player.spawnProtectionMs =
-            Math.max(
-                0,
-                player.spawnProtectionMs -
-                delta
-            );
+        player.spawnProtectionMs -=
+            delta;
+
+    }
 
 
-        player.aura.setAlpha(
-            Math.sin(
-                performance.now() *
-                0.012
-            ) > 0
-                ? 0.35
-                : 0.10
+    if (
+        player.aura
+    ) {
+
+        player.aura.setPosition(
+            player.x,
+            player.y
+        );
+
+
+        player.aura.setFillStyle(
+            player.color,
+            player.spawnProtectionMs > 0
+                ? 0.30
+                : 0.16
+        );
+
+    }
+
+
+    if (
+        player.avatarText
+    ) {
+
+        player.avatarText.setPosition(
+            player.x,
+            player.y
+        );
+
+    }
+
+
+    if (
+        player.nameText
+    ) {
+
+        player.nameText.setPosition(
+            player.x,
+            player.y - 43
+        );
+
+    }
+
+
+    if (
+        player.coinText
+    ) {
+
+        player.coinText.setPosition(
+            player.x,
+            player.y + 35
+        );
+
+
+        player.coinText.setText(
+            `🪙 ${player.coins}`
+        );
+
+    }
+
+
+    if (
+        player.knifeText
+    ) {
+
+        player.knifeText.setPosition(
+            player.x,
+            player.y + 50
+        );
+
+
+        player.knifeText.setText(
+            `🔪 ${player.knifeCount}`
+        );
+
+    }
+
+
+    if (
+        player.killText
+    ) {
+
+        player.killText.setPosition(
+            player.x,
+            player.y + 64
+        );
+
+
+        player.killText.setText(
+            `💀 ${player.kills}`
+        );
+
+    }
+
+
+    updateHealthBar(
+        player
+    );
+
+}
+
+
+// ============================================================
+// HP VISUAL
+// ============================================================
+
+function updateHealthBar(player) {
+
+    if (
+        !player.hpBackground ||
+        !player.hpBar
+    ) {
+
+        return;
+
+    }
+
+
+    player.hpBackground.setPosition(
+        player.x,
+        player.y + 78
+    );
+
+
+    player.hpBar.setPosition(
+        player.x - 30,
+        player.y + 78
+    );
+
+
+    const ratio =
+        clamp(
+            player.hp /
+            player.maxHp,
+            0,
+            1
+        );
+
+
+    player.hpBar.width =
+        60 * ratio;
+
+
+    if (
+        ratio > 0.5
+    ) {
+
+        player.hpBar.setFillStyle(
+            0x22c55e
+        );
+
+    }
+    else if (
+        ratio > 0.25
+    ) {
+
+        player.hpBar.setFillStyle(
+            0xf59e0b
         );
 
     }
     else {
 
-        player.aura.setAlpha(
-            1
+        player.hpBar.setFillStyle(
+            0xef4444
         );
 
     }
@@ -3353,9 +3751,154 @@ function updatePlayerVisuals(
 }
 
 
-// ======================================================
+// ============================================================
+// WINNER
+// ============================================================
+
+function checkWinner() {
+
+    if (!roundActive) {
+
+        return;
+
+    }
+
+
+    const alive =
+        players.filter(
+            player =>
+                player.alive
+        );
+
+
+    if (
+        alive.length > 1
+    ) {
+
+        return;
+
+    }
+
+
+    if (
+        alive.length === 1
+    ) {
+
+        showWinner(
+            alive[0]
+        );
+
+    }
+    else {
+
+        finishRound();
+
+    }
+
+}
+
+
+// ============================================================
+// SHOW WINNER
+// ============================================================
+
+function showWinner(
+    winner
+) {
+
+    if (!winner) {
+
+        finishRound();
+
+        return;
+
+    }
+
+
+    roundActive = false;
+    roundEnded = true;
+
+
+    const button =
+        document.getElementById(
+            "new-round-button"
+        );
+
+
+    if (button) {
+
+        button.disabled = false;
+
+    }
+
+
+    if (
+        scene.winnerData
+    ) {
+
+        scene.winnerData
+            .winnerAvatar
+            .setText(
+                winner.avatar
+            );
+
+
+        scene.winnerData
+            .winnerName
+            .setText(
+                winner.name
+            );
+
+
+        scene.winnerData
+            .killsText
+            .setText(
+                `💀 ${winner.kills} kills`
+            );
+
+    }
+
+
+    scene.winnerContainer
+        .setVisible(true);
+
+
+    updateRoundTimer();
+
+}
+
+
+// ============================================================
+// FINISH ROUND
+// ============================================================
+
+function finishRound() {
+
+    roundActive = false;
+    roundEnded = true;
+
+
+    const button =
+        document.getElementById(
+            "new-round-button"
+        );
+
+
+    if (button) {
+
+        button.disabled = false;
+
+    }
+
+
+    updateRoundTimer();
+
+}
+
+
+// ============================================================
 // TIMER
-// ======================================================
+// ============================================================
 
 function updateRoundTimer() {
 
@@ -3369,80 +3912,103 @@ function updateRoundTimer() {
 
     const totalSeconds =
         Math.ceil(
-            remaining /
-            1000
+            remaining / 1000
         );
 
 
     const minutes =
         Math.floor(
-            totalSeconds /
-            60
+            totalSeconds / 60
         );
 
 
     const seconds =
-        totalSeconds %
-        60;
+        totalSeconds % 60;
 
 
-    const formatted =
-        String(minutes)
-            .padStart(
-                2,
-                "0"
-            ) +
-        ":" +
-        String(seconds)
-            .padStart(
-                2,
-                "0"
-            );
+    if (
+        roundTimerText
+    ) {
+
+        roundTimerText.setText(
+            `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+        );
+
+    }
 
 
-    roundTimerText.setText(
-        "⏱️ " +
-        formatted
-    );
+    if (
+        roundText
+    ) {
+
+        roundText.setText(
+            `Rodada ${roundNumber}`
+        );
+
+    }
 
 
-    roundText.setText(
-        "🏁 Rodada " +
-        roundNumber
-    );
+    const participants =
+        players.filter(
+            player =>
+                player.alive
+        ).length;
 
 
-    document
-        .getElementById(
-            "panel-round"
-        )
-        .innerText =
-        roundNumber;
-
-
-    document
-        .getElementById(
-            "panel-participants"
-        )
-        .innerText =
-        players.length;
-
-
-    document
-        .getElementById(
-            "panel-waiting"
-        )
-        .innerText =
+    const waiting =
         pendingPlayers.size;
+
+
+    const participantElement =
+        document.getElementById(
+            "panel-participants"
+        );
+
+
+    if (
+        participantElement
+    ) {
+
+        participantElement.innerText =
+            participants;
+
+    }
+
+
+    const waitingElement =
+        document.getElementById(
+            "panel-waiting"
+        );
+
+
+    if (
+        waitingElement
+    ) {
+
+        waitingElement.innerText =
+            waiting;
+
+    }
+
+
+    if (
+        playerCountText
+    ) {
+
+        playerCountText.setText(
+            `👥 ${participants}`
+        );
+
+    }
 
 }
 
 
-// ======================================================
-// ENCONTRAR VENCEDOR
-// ======================================================
+// ============================================================
+// FIM POR TEMPO
+// ============================================================
 
-function findWinner() {
+function checkTimeWinner() {
 
     const alive =
         players.filter(
@@ -3452,492 +4018,164 @@ function findWinner() {
 
 
     if (
-        alive.length === 1
+        alive.length === 0
     ) {
 
-        return alive[0];
-
-    }
-
-
-    const contenders =
-        alive.length > 0
-            ? alive
-            : [...players];
-
-
-    contenders.sort(
-        (
-            a,
-            b
-        ) => {
-
-            if (
-                b.kills !==
-                a.kills
-            ) {
-
-                return (
-                    b.kills -
-                    a.kills
-                );
-
-            }
-
-
-            if (
-                b.hp !==
-                a.hp
-            ) {
-
-                return (
-                    b.hp -
-                    a.hp
-                );
-
-            }
-
-
-            if (
-                b.knifeCount !==
-                a.knifeCount
-            ) {
-
-                return (
-                    b.knifeCount -
-                    a.knifeCount
-                );
-
-            }
-
-
-            return (
-                b.coins -
-                a.coins
-            );
-
-        }
-    );
-
-
-    return (
-        contenders[0] ||
-        null
-    );
-
-}
-
-
-// ======================================================
-// FINAL DA RODADA
-// ======================================================
-
-function endRound() {
-
-    if (
-        roundEnded
-    ) {
+        finishRound();
 
         return;
 
     }
 
 
-    roundActive =
-        false;
-
-
-    roundEnded =
-        true;
-
-
-    roundElapsedMs =
-        ROUND_DURATION_MS;
-
-
-    updateRoundTimer();
-
-
-    const winner =
-        findWinner();
-
-
-    if (
-        winner
-    ) {
-
-        showWinnerOverlay(
-            winner
-        );
-
-    }
-
-
-    document
-        .getElementById(
-            "new-round-button"
-        )
-        .disabled = false;
-
-
-    updatePlayersList();
-
-}
-
-
-// ======================================================
-// WIN
-// ======================================================
-
-function showWinnerOverlay(
-    winner
-) {
-
-    // ================================================
-    // FOTO / AVATAR
-    // ================================================
-
-    scene.winnerData
-        .winnerAvatar
-        .setText(
-            winner.avatar ||
-            "😎"
-        );
-
-
-    // ================================================
-    // NOME
-    // ================================================
-
-    scene.winnerData
-        .winnerName
-        .setText(
-            winner.name
-        );
-
-
-    // ================================================
-    // COR
-    // ================================================
-
-    scene.winnerData
-        .winnerName
-        .setColor(
-            colorToHex(
-                winner.color
-            )
-        );
-
-
-    // ================================================
-    // KILLS
-    // ================================================
-
-    scene.winnerData
-        .killsText
-        .setText(
-            "💀 " +
-            winner.kills +
-            " KILLS"
-        );
-
-
-    // ================================================
-    // MOSTRAR
-    // ================================================
-
-    scene.winnerContainer
-        .setVisible(
-            true
-        );
-
-
-    // ================================================
-    // ANIMAÇÕES
-    // ================================================
-
-    scene.tweens.killTweensOf(
-        scene.winnerData.winText
+    alive.sort(
+        (
+            a,
+            b
+        ) =>
+            b.coins -
+            a.coins
     );
 
 
-    scene.winnerData
-        .winText
-        .setScale(
-            0.6
-        );
-
-
-    scene.winnerData
-        .winnerAvatar
-        .setScale(
-            0.7
-        );
-
-
-    scene.winnerData
-        .winnerName
-        .setScale(
-            0.7
-        );
-
-
-    scene.tweens.add({
-
-        targets:
-            scene.winnerData
-                .winText,
-
-        scale:
-            1,
-
-        duration:
-            550,
-
-        ease:
-            "Back.easeOut"
-
-    });
-
-
-    scene.tweens.add({
-
-        targets:
-            scene.winnerData
-                .winnerAvatar,
-
-        scale:
-            1,
-
-        duration:
-            550,
-
-        delay:
-            100,
-
-        ease:
-            "Back.easeOut"
-
-    });
-
-
-    scene.tweens.add({
-
-        targets:
-            scene.winnerData
-                .winnerName,
-
-        scale:
-            1,
-
-        duration:
-            650,
-
-        delay:
-            150,
-
-        ease:
-            "Back.easeOut"
-
-    });
-
-
-    scene.tweens.add({
-
-        targets:
-            scene.winnerData
-                .winText,
-
-        scale:
-            1.06,
-
-        duration:
-            750,
-
-        yoyo:
-            true,
-
-        repeat:
-            -1
-
-    });
+    showWinner(
+        alive[0]
+    );
 
 }
 
 
-// ======================================================
+// ============================================================
 // UPDATE
-// ======================================================
+// ============================================================
 
 function update(
     time,
     delta
 ) {
 
-    // ================================================
-    // RODADA ATIVA
-    // ================================================
-
     if (
-        roundActive
+        !roundActive
     ) {
 
-        roundElapsedMs +=
-            delta;
-
-
-        // ==========================================
-        // TIMER
-        // ==========================================
-
-        const currentSecond =
-            Math.floor(
-                roundElapsedMs /
-                1000
-            );
-
-
-        if (
-            currentSecond !==
-            lastDisplayedSecond
-        ) {
-
-            lastDisplayedSecond =
-                currentSecond;
-
-
-            updateRoundTimer();
-
-        }
-
-
-        // ==========================================
-        // FIM
-        // ==========================================
-
-        if (
-            roundElapsedMs >=
-            ROUND_DURATION_MS
-        ) {
-
-            endRound();
-
-            return;
-
-        }
-
-
-        // ==========================================
-        // GRID
-        // ==========================================
-
-        rebuildSpatialGrid();
-
-
-        // ==========================================
-        // JOGADORES
-        // ==========================================
-
-        for (
-            const player
-            of players
-        ) {
-
-            if (
-                !player.alive
-            ) {
-
-                continue;
-
-            }
-
-
-            updateAI(
-                player,
-                delta
-            );
-
-
-            movePlayer(
-                player,
-                delta
-            );
-
-
-            player.rotationAngle +=
-                player.rotationSpeed;
-
-
-            player.attackTimer -=
-                delta;
-
-
-            if (
-                player.attackTimer <= 0
-            ) {
-
-                tryAttack(
-                    player
-                );
-
-
-                // ==================================
-                // INTERVALO
-                // ==================================
-                //
-                // Ataques mais lentos agora.
-                //
-                // ==================================
-
-                const interval =
-                    Math.max(
-                        900,
-                        1650 -
-                        Math.sqrt(
-                            player.knifeCount
-                        ) *
-                        40
-                    );
-
-
-                player.attackTimer =
-                    interval;
-
-            }
-
-
-            updatePlayerVisuals(
-                player,
-                delta
-            );
-
-        }
-
-
-        // ==========================================
-        // ARMAS
-        // ==========================================
-
         drawAllWeapons();
+
+        return;
 
     }
 
 
-    // ==================================================
+    delta =
+        Math.min(
+            delta,
+            50
+        );
+
+
+    roundElapsedMs +=
+        delta;
+
+
+    if (
+        roundElapsedMs >=
+        ROUND_DURATION_MS
+    ) {
+
+        checkTimeWinner();
+
+        return;
+
+    }
+
+
+    rebuildSpatialGrid();
+
+
+    // ========================================================
+    // IA + MOVIMENTO
+    // ========================================================
+
+    for (
+        const player of players
+    ) {
+
+        if (
+            !player.alive
+        ) {
+
+            continue;
+
+        }
+
+
+        updateAI(
+            player,
+            delta
+        );
+
+
+        movePlayer(
+            player,
+            delta
+        );
+
+    }
+
+
+    // ========================================================
+    // SEPARAÇÃO FINAL
+    // ========================================================
+
+    resolveAllPlayerOverlaps();
+
+
+    // ========================================================
+    // ROTAÇÃO
+    // ========================================================
+
+    for (
+        const player of players
+    ) {
+
+        if (
+            !player.alive
+        ) {
+
+            continue;
+
+        }
+
+
+        updateRotation(
+            player,
+            delta
+        );
+
+
+        updatePlayerVisuals(
+            player,
+            delta
+        );
+
+    }
+
+
+    drawAllWeapons();
+
+
+    // ========================================================
     // MENSAGEM
-    // ==================================================
+    // ========================================================
 
     if (
         battleMessageTimer > 0
     ) {
 
         battleMessageTimer -=
-            1;
+            delta;
 
     }
-    else if (
-        roundActive
-    ) {
+    else {
 
         battleText.setText(
             ""
@@ -3946,28 +4184,22 @@ function update(
     }
 
 
-    // ==================================================
-    // PAINEL
-    // ==================================================
+    // ========================================================
+    // LISTA
+    // ========================================================
+
+    listUpdateTimer -=
+        delta;
+
 
     if (
-        Math.floor(
-            time /
-            1000
-        ) !==
-        Math.floor(
-            (
-                time -
-                delta
-            ) /
-            1000
-        )
+        listUpdateTimer <= 0
     ) {
 
+        listUpdateTimer = 250;
+
         updatePlayersList();
-
         updatePlayerPreview();
-
         updateRoundTimer();
 
     }
@@ -3975,13 +4207,77 @@ function update(
 }
 
 
-// ======================================================
-// ENVIAR MOEDAS
-// ======================================================
+// ============================================================
+// ADICIONAR MOEDAS
+// ============================================================
 
-function sendCoins(
+function addCoinsToExistingPlayer(
+    player,
     amount
 ) {
+
+    const value =
+        Math.max(
+            0,
+            Number(amount) || 0
+        );
+
+
+    if (
+        value <= 0
+    ) {
+
+        return;
+
+    }
+
+
+    player.coins +=
+        value;
+
+
+    player.knifeCount =
+        calculateKnifeCount(
+            player.coins
+        );
+
+
+    player.power =
+        calculatePower(
+            player.knifeCount
+        );
+
+
+    player.hp =
+        player.maxHp;
+
+
+    updatePlayerVisuals(
+        player,
+        0
+    );
+
+
+    showBattleMessage(
+        "🎁 " +
+        player.name +
+        " recebeu +" +
+        value +
+        " moedas!"
+    );
+
+
+    updatePlayersList();
+    updatePlayerPreview();
+
+}
+
+
+// ============================================================
+// SEND COINS
+// ============================================================
+
+function sendCoins(amount) {
 
     if (
         !roundActive
@@ -3996,37 +4292,41 @@ function sendCoins(
     }
 
 
+    const nameElement =
+        document.getElementById(
+            "username"
+        );
+
+
+    const userIdElement =
+        document.getElementById(
+            "userid"
+        );
+
+
+    const avatarElement =
+        document.getElementById(
+            "avatar"
+        );
+
+
     const name =
-        document
-            .getElementById(
-                "username"
-            )
-            .value
-            .trim();
+        nameElement
+            ? nameElement.value.trim()
+            : "";
 
 
-    const userIdInput =
-        document
-            .getElementById(
-                "userid"
-            )
-            .value
-            .trim();
+    const userId =
+        userIdElement
+            ? userIdElement.value.trim()
+            : "";
 
 
     const avatar =
-        document
-            .getElementById(
-                "avatar"
-            )
-            .value
-            .trim() ||
-        "😎";
+        avatarElement
+            ? avatarElement.value.trim()
+            : "😎";
 
-
-    // ================================================
-    // VALIDAÇÃO
-    // ================================================
 
     if (!name) {
 
@@ -4039,7 +4339,7 @@ function sendCoins(
     }
 
 
-    if (!userIdInput) {
+    if (!userId) {
 
         setStatus(
             "⚠️ Digite o ID."
@@ -4050,53 +4350,72 @@ function sendCoins(
     }
 
 
-    const userId =
-        String(
-            userIdInput
+    const value =
+        Math.max(
+            0,
+            Number(amount) || 0
         );
 
-
-    // ================================================
-    // PROCURAR JOGADOR
-    // ================================================
-
-    const existingPlayer =
-        playerMap.get(
-            userId
-        );
-
-
-    // ================================================
-    // JÁ ESTÁ NA ARENA
-    // ================================================
 
     if (
-        existingPlayer
+        value <= 0
     ) {
 
-        existingPlayer.name =
+        return;
+
+    }
+
+
+    const existing =
+        playerMap.get(
+            String(userId)
+        );
+
+
+    if (existing) {
+
+        existing.name =
             name;
 
 
-        existingPlayer.avatar =
-            avatar;
+        existing.avatar =
+            avatar || "😎";
 
 
-        existingPlayer.nameText
-            .setText(
-                name
+        if (
+            existing.nameText
+        ) {
+
+            existing.nameText.setText(
+                existing.name
             );
 
+        }
 
-        existingPlayer.avatarText
-            .setText(
-                avatar
+
+        if (
+            existing.avatarText
+        ) {
+
+            existing.avatarText.setText(
+                existing.avatar
             );
+
+        }
 
 
         addCoinsToExistingPlayer(
-            existingPlayer,
-            amount
+            existing,
+            value
+        );
+
+
+        setStatus(
+            "🎁 " +
+            name +
+            " recebeu +" +
+            value +
+            " moedas!"
         );
 
 
@@ -4105,101 +4424,44 @@ function sendCoins(
     }
 
 
-    // ================================================
-    // PROCURAR PENDENTE
-    // ================================================
-
-    let pending =
-        pendingPlayers.get(
+    const player =
+        addPlayerToArena(
+            name,
+            avatar || "😎",
+            value,
             userId
         );
 
 
-    if (
-        !pending
-    ) {
-
-        pending = {
-
-            userId:
-                userId,
-
-            name:
-                name,
-
-            avatar:
-                avatar,
-
-            coins:
-                0
-
-        };
+    pendingPlayers.delete(
+        String(userId)
+    );
 
 
-        pendingPlayers.set(
-            userId,
-            pending
-        );
-
-    }
-
-
-    pending.name =
-        name;
+    showBattleMessage(
+        "🔥 " +
+        player.name +
+        " entrou na arena!"
+    );
 
 
-    pending.avatar =
-        avatar;
+    setStatus(
+        "🔥 " +
+        player.name +
+        " entrou! 🛡️ Proteção inicial."
+    );
 
 
-    pending.coins +=
-        Number(
-            amount
-        );
-
-
-    // ================================================
-    // ATINGIU 10
-    // ================================================
-
-    if (
-        pending.coins >= 10
-    ) {
-
-        enterPendingPlayer(
-            pending
-        );
-
-    }
-    else {
-
-        setStatus(
-            "🪙 " +
-            pending.name +
-            " possui " +
-            pending.coins +
-            " moedas. " +
-            "Faltam " +
-            (
-                10 -
-                pending.coins
-            ) +
-            "."
-        );
-
-    }
-
-
+    updatePlayersList();
     updatePlayerPreview();
-
     updateRoundTimer();
 
 }
 
 
-// ======================================================
+// ============================================================
 // HEART-ME
-// ======================================================
+// ============================================================
 
 function sendHeart() {
 
@@ -4216,32 +4478,40 @@ function sendHeart() {
     }
 
 
+    const nameElement =
+        document.getElementById(
+            "username"
+        );
+
+
+    const userIdElement =
+        document.getElementById(
+            "userid"
+        );
+
+
+    const avatarElement =
+        document.getElementById(
+            "avatar"
+        );
+
+
     const name =
-        document
-            .getElementById(
-                "username"
-            )
-            .value
-            .trim();
+        nameElement
+            ? nameElement.value.trim()
+            : "";
 
 
-    const userIdInput =
-        document
-            .getElementById(
-                "userid"
-            )
-            .value
-            .trim();
+    const userId =
+        userIdElement
+            ? userIdElement.value.trim()
+            : "";
 
 
     const avatar =
-        document
-            .getElementById(
-                "avatar"
-            )
-            .value
-            .trim() ||
-        "❤️";
+        avatarElement
+            ? avatarElement.value.trim()
+            : "❤️";
 
 
     if (!name) {
@@ -4255,7 +4525,7 @@ function sendHeart() {
     }
 
 
-    if (!userIdInput) {
+    if (!userId) {
 
         setStatus(
             "⚠️ Digite o ID."
@@ -4266,25 +4536,13 @@ function sendHeart() {
     }
 
 
-    const userId =
-        String(
-            userIdInput
-        );
-
-
-    // ================================================
-    // JÁ ESTÁ NA ARENA
-    // ================================================
-
-    const existingPlayer =
+    const existing =
         playerMap.get(
-            userId
+            String(userId)
         );
 
 
-    if (
-        existingPlayer
-    ) {
+    if (existing) {
 
         setStatus(
             "❤️ " +
@@ -4297,59 +4555,24 @@ function sendHeart() {
     }
 
 
-    // ================================================
-    // PENDENTE
-    // ================================================
-
-    let pending =
-        pendingPlayers.get(
+    const player =
+        addPlayerToArena(
+            name,
+            avatar || "❤️",
+            10,
             userId
         );
 
 
-    if (
-        !pending
-    ) {
-
-        pending = {
-
-            userId:
-                userId,
-
-            name:
-                name,
-
-            avatar:
-                avatar,
-
-            coins:
-                0
-
-        };
+    pendingPlayers.delete(
+        String(userId)
+    );
 
 
-        pendingPlayers.set(
-            userId,
-            pending
-        );
-
-    }
-
-
-    pending.name =
-        name;
-
-
-    pending.avatar =
-        avatar;
-
-
-    // ================================================
-    // ENTRAR
-    // ================================================
-
-    enterPendingPlayer(
-        pending
+    showBattleMessage(
+        "❤️ " +
+        player.name +
+        " entrou na arena!"
     );
 
 
@@ -4360,20 +4583,27 @@ function sendHeart() {
     );
 
 
+    updatePlayersList();
     updatePlayerPreview();
-
     updateRoundTimer();
 
 }
 
 
-// ======================================================
-// ENTRAR PENDENTE
-// ======================================================
+// ============================================================
+// FUNÇÃO COMPATÍVEL COM PENDENTES
+// ============================================================
 
 function enterPendingPlayer(
     pending
 ) {
+
+    if (!pending) {
+
+        return null;
+
+    }
+
 
     const userId =
         String(
@@ -4381,74 +4611,48 @@ function enterPendingPlayer(
         );
 
 
-    // Segurança
-
-    if (
-        playerMap.has(
+    const existing =
+        playerMap.get(
             userId
-        )
-    ) {
+        );
 
-        return;
+
+    if (existing) {
+
+        pendingPlayers.delete(
+            userId
+        );
+
+        return existing;
 
     }
 
-
-    // Remover da fila
 
     pendingPlayers.delete(
         userId
     );
 
 
-    // Criar jogador
-
-    const player =
-        addPlayerToArena(
-            pending.name,
-            pending.avatar,
-            pending.coins,
-            userId
-        );
-
-
-    showBattleMessage(
-        "🔥 " +
-        player.name +
-        " entrou na arena!"
+    return addPlayerToArena(
+        pending.name,
+        pending.avatar,
+        pending.coins,
+        userId
     );
-
-
-    setStatus(
-        "🔥 " +
-        player.name +
-        " entrou! " +
-        "🛡️ 7 segundos de proteção."
-    );
-
-
-    updatePlayersList();
-
-    updatePlayerPreview();
-
-    updateRoundTimer();
 
 }
 
 
-// ======================================================
+// ============================================================
 // PREVIEW
-// ======================================================
+// ============================================================
 
 function updatePlayerPreview() {
 
-    const userId =
-        document
-            .getElementById(
-                "userid"
-            )
-            .value
-            .trim();
+    const userIdElement =
+        document.getElementById(
+            "userid"
+        );
 
 
     const coinsElement =
@@ -4469,52 +4673,50 @@ function updatePlayerPreview() {
         );
 
 
-    if (!userId) {
-
-        coinsElement.innerText =
-            "0";
-
-
-        knivesElement.innerText =
-            "0";
-
-
-        killsElement.innerText =
-            "0";
-
+    if (
+        !coinsElement ||
+        !knivesElement ||
+        !killsElement
+    ) {
 
         return;
 
     }
 
 
-    const normalizedId =
-        String(
-            userId
-        );
+    const userId =
+        userIdElement
+            ? userIdElement.value.trim()
+            : "";
+
+
+    if (!userId) {
+
+        coinsElement.innerText = "0";
+        knivesElement.innerText = "0";
+        killsElement.innerText = "0";
+
+        return;
+
+    }
 
 
     const player =
         playerMap.get(
-            normalizedId
+            String(userId)
         );
 
 
-    if (
-        player
-    ) {
+    if (player) {
 
         coinsElement.innerText =
             player.coins;
 
-
         knivesElement.innerText =
             player.knifeCount;
 
-
         killsElement.innerText =
             player.kills;
-
 
         return;
 
@@ -4523,68 +4725,60 @@ function updatePlayerPreview() {
 
     const pending =
         pendingPlayers.get(
-            normalizedId
+            String(userId)
         );
 
 
-    if (
-        pending
-    ) {
+    if (pending) {
 
         coinsElement.innerText =
             pending.coins;
-
 
         knivesElement.innerText =
             calculateKnifeCount(
                 pending.coins
             );
 
-
         killsElement.innerText =
             "0";
-
 
         return;
 
     }
 
 
-    coinsElement.innerText =
-        "0";
-
-
-    knivesElement.innerText =
-        "0";
-
-
-    killsElement.innerText =
-        "0";
+    coinsElement.innerText = "0";
+    knivesElement.innerText = "0";
+    killsElement.innerText = "0";
 
 }
 
 
-// ======================================================
+// ============================================================
 // STATUS
-// ======================================================
+// ============================================================
 
-function setStatus(
-    message
-) {
+function setStatus(message) {
 
-    document
-        .getElementById(
+    const element =
+        document.getElementById(
             "selected-status"
-        )
-        .innerText =
-        message;
+        );
+
+
+    if (element) {
+
+        element.innerText =
+            message;
+
+    }
 
 }
 
 
-// ======================================================
+// ============================================================
 // LISTA
-// ======================================================
+// ============================================================
 
 function updatePlayersList() {
 
@@ -4594,15 +4788,19 @@ function updatePlayersList() {
         );
 
 
+    if (!container) {
+
+        return;
+
+    }
+
+
     if (
         players.length === 0
     ) {
 
         container.innerHTML =
-            '<div class="empty-list">' +
-            'Nenhum jogador ainda.' +
-            '</div>';
-
+            '<div class="empty-list">Nenhum jogador ainda.</div>';
 
         return;
 
@@ -4615,8 +4813,6 @@ function updatePlayersList() {
                 a,
                 b
             ) => {
-
-                // Vivos primeiro
 
                 if (
                     a.alive &&
@@ -4638,8 +4834,6 @@ function updatePlayersList() {
                 }
 
 
-                // Kills
-
                 if (
                     b.kills !==
                     a.kills
@@ -4652,8 +4846,6 @@ function updatePlayersList() {
 
                 }
 
-
-                // Moedas
 
                 return (
                     b.coins -
@@ -4671,13 +4863,11 @@ function updatePlayersList() {
         );
 
 
-    container.innerHTML =
-        "";
+    container.innerHTML = "";
 
 
     for (
-        const player
-        of visible
+        const player of visible
     ) {
 
         const row =
@@ -4789,28 +4979,46 @@ function updatePlayersList() {
             "click",
             function() {
 
-                document
-                    .getElementById(
+                const username =
+                    document.getElementById(
                         "username"
-                    )
-                    .value =
-                    player.name;
+                    );
 
 
-                document
-                    .getElementById(
+                const userid =
+                    document.getElementById(
                         "userid"
-                    )
-                    .value =
-                    player.userId;
+                    );
 
 
-                document
-                    .getElementById(
+                const avatarInput =
+                    document.getElementById(
                         "avatar"
-                    )
-                    .value =
-                    player.avatar;
+                    );
+
+
+                if (username) {
+
+                    username.value =
+                        player.name;
+
+                }
+
+
+                if (userid) {
+
+                    userid.value =
+                        player.userId;
+
+                }
+
+
+                if (avatarInput) {
+
+                    avatarInput.value =
+                        player.avatar;
+
+                }
 
 
                 updatePlayerPreview();
@@ -4825,10 +5033,6 @@ function updatePlayersList() {
 
     }
 
-
-    // ================================================
-    // AVISO
-    // ================================================
 
     if (
         players.length >
@@ -4862,73 +5066,20 @@ function updatePlayersList() {
 }
 
 
-// ======================================================
-// DISTÂNCIA
-// ======================================================
-
-function distanceBetween(
-    x1,
-    y1,
-    x2,
-    y2
-) {
-
-    const dx =
-        x2 - x1;
-
-
-    const dy =
-        y2 - y1;
-
-
-    return Math.sqrt(
-        dx * dx +
-        dy * dy
-    );
-
-}
-
-
-// ======================================================
-// NORMALIZAR ÂNGULO
-// ======================================================
-
-function normalizeAngle(
-    angle
-) {
-
-    while (
-        angle > Math.PI
-    ) {
-
-        angle -=
-            Math.PI * 2;
-
-    }
-
-
-    while (
-        angle < -Math.PI
-    ) {
-
-        angle +=
-            Math.PI * 2;
-
-    }
-
-
-    return angle;
-
-}
-
-
-// ======================================================
+// ============================================================
 // MENSAGEM
-// ======================================================
+// ============================================================
 
 function showBattleMessage(
     message
 ) {
+
+    if (!battleText) {
+
+        return;
+
+    }
+
 
     battleText.setText(
         message
@@ -4936,22 +5087,20 @@ function showBattleMessage(
 
 
     battleMessageTimer =
-        140;
+        1800;
 
 }
 
 
-// ======================================================
-// EXPORT DEBUG
-// ======================================================
+// ============================================================
+// TESTE DO SIMULADOR
+// ============================================================
 //
-// Facilita testar no console.
-//
-// Você pode digitar:
+// Console:
 //
 // testAdd("Joao", "123", "😎", 10)
 //
-// ======================================================
+// ============================================================
 
 window.testAdd =
     function(
@@ -4961,30 +5110,46 @@ window.testAdd =
         coins = 10
     ) {
 
-        document
-            .getElementById(
+        const username =
+            document.getElementById(
                 "username"
-            )
-            .value =
-            name;
-
-
-        document
-            .getElementById(
-                "userid"
-            )
-            .value =
-            String(
-                userId
             );
 
 
-        document
-            .getElementById(
+        const userid =
+            document.getElementById(
+                "userid"
+            );
+
+
+        const avatarInput =
+            document.getElementById(
                 "avatar"
-            )
-            .value =
-            avatar;
+            );
+
+
+        if (username) {
+
+            username.value =
+                name;
+
+        }
+
+
+        if (userid) {
+
+            userid.value =
+                String(userId);
+
+        }
+
+
+        if (avatarInput) {
+
+            avatarInput.value =
+                avatar;
+
+        }
 
 
         sendCoins(
@@ -4992,3 +5157,111 @@ window.testAdd =
         );
 
     };
+
+
+// ============================================================
+// FUNÇÃO DE TESTE DIRETO
+// ============================================================
+
+window.addPendingPlayer =
+    function(
+        name,
+        userId,
+        avatar = "😎",
+        coins = 10
+    ) {
+
+        if (!roundActive) {
+
+            return null;
+
+        }
+
+
+        const player =
+            addPlayerToArena(
+                name,
+                avatar,
+                coins,
+                userId
+            );
+
+
+        pendingPlayers.delete(
+            String(userId)
+        );
+
+
+        updatePlayersList();
+        updatePlayerPreview();
+        updateRoundTimer();
+
+
+        return player;
+
+    };
+
+
+// ============================================================
+// API GLOBAL
+// ============================================================
+
+window.sendCoins =
+    sendCoins;
+
+window.sendHeart =
+    sendHeart;
+
+window.startNewRound =
+    startNewRound;
+
+window.beginRound =
+    beginRound;
+
+window.updatePlayerPreview =
+    updatePlayerPreview;
+
+
+// ============================================================
+// DEBUG
+// ============================================================
+
+window.KnifeBattle = {
+
+    get players() {
+
+        return players;
+
+    },
+
+
+    get playerMap() {
+
+        return playerMap;
+
+    },
+
+
+    get pendingPlayers() {
+
+        return pendingPlayers;
+
+    },
+
+
+    addPlayer:
+        addPlayerToArena,
+
+
+    attack:
+        tryAttack,
+
+
+    startRound:
+        beginRound,
+
+
+    newRound:
+        startNewRound
+
+};
