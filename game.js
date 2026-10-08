@@ -1,23 +1,18 @@
 // ============================================================
-// KNIFE BATTLE LIVE
+// KNIFE BATTLE LIVE (1v1 por pares + sem ressuscitar + moedas transferidas + tamanho dinâmico)
 // ============================================================
-// Regras:
-//
 // 10 moedas = 1 faca
-// Novo jogador entra imediatamente ao receber moedas
-// Heart-Me também entra imediatamente
 //
-// Combate:
-// - jogador forte persegue
-// - jogador fraco foge
-// - forte tenta permanecer atrás/lateral do fraco
-// - corpos nunca devem ficar sobrepostos
-// - espaço das facas é respeitado fora do combate
-// - durante combate as pontas das facas podem se alcançar
-// - corpo não causa dano
-// - somente as facas causam dano
-// - a cada 3 rotações completas = -10 moedas
-// - 0 moedas = eliminado
+// REGRAS:
+// - O mesmo userId atualiza o jogador (ganha mais moedas) ENQUANTO VIVO
+// - Se morrer (coins == 0), NÃO RESSUSCITA mesmo que mande moedas depois
+// - Dano/ataque TRANSFERE moedas do alvo para o atacante (não somem)
+// - Combate 1v1 por pares (ranking por moedas): (1º vs 2º), (3º vs 4º)...
+// - Maior persegue o menor; menor foge do maior
+// - Maior é mais rápido (velocidade dinâmica por facas)
+// - Tamanho do corpo cresce com as facas e colisão considera também o alcance das facas
+// - 3 rotações completas => 1 ataque de 10 moedas (ou resto)
+// - Rodada dura 5 minutos
 // ============================================================
 
 
@@ -40,55 +35,56 @@ const SPAWN_PROTECTION_MS = 5000;
 const MAX_LIST_ROWS = 100;
 const MAX_VISUAL_KNIVES = 24;
 
+// Pareamento 1v1
+const PAIR_REBUILD_INTERVAL_MS = 350;
+
 
 // ============================================================
-// MOVIMENTO
+// MOVIMENTO / TAMANHO
 // ============================================================
 
-const PLAYER_RADIUS = 28;
+const PLAYER_RADIUS_BASE = 26;           // base do corpo
+const PLAYER_RADIUS_BONUS_CAP = 22;      // quanto pode crescer no máximo
+const PLAYER_RADIUS_BONUS_SCALE = 2.2;   // crescimento ~ sqrt(facas) * scale
 
-// Espaço mínimo físico do corpo.
-const MIN_PLAYER_DISTANCE = 82;
+const PLAYER_SPACE_MARGIN = 8;
 
-// Espaço extra para impedir que as áreas das facas
-// fiquem se sobrepondo quando não existe combate.
-const PLAYER_SPACE_MARGIN = 10;
+const COMBAT_BODY_GAP = 12;
 
-// Pequena distância adicional entre os corpos
-// quando dois jogadores estão efetivamente lutando.
-const COMBAT_BODY_GAP = 10;
+const COMBAT_DISTANCE = 112;
 
-// Distância desejada entre o forte e o fraco.
-const BEHIND_DISTANCE = 118;
+const MAX_COMBAT_DISTANCE = 150;
 
-const BEHIND_SIDE_OFFSET = 38;
+const MIN_COMBAT_DISTANCE = 82;
 
-const BORDER_MARGIN = 65;
+const RETURN_TO_BATTLE_DISTANCE = 185;
 
-const MIN_MOVE_SPEED = 24;
+const MIN_MOVE_SPEED = 25;
 const MAX_MOVE_SPEED = 48;
 
-const FLEE_SPEED = 42;
-const CHASE_SPEED = 34;
+const COMBAT_STRAFE_FORCE = 0.48;
 
-const SEPARATION_FORCE = 2.8;
+const SEPARATION_FORCE = 1.8;
+
+const BORDER_MARGIN = 65;
 
 
 // ============================================================
 // COMBATE
 // ============================================================
 
-// 3 voltas completas = -10 moedas
 const ROTATIONS_PER_COIN_DAMAGE = 3;
 
 const COINS_PER_ATTACK = 10;
 
-const MIN_ROTATION_SPEED = 0.055;
-const MAX_ROTATION_SPEED = 0.075;
+const MIN_ROTATION_SPEED = 0.065;
+const MAX_ROTATION_SPEED = 0.085;
 
 const KNIFE_LENGTH = 28;
 
-const TOOL_HIT_GAP = 10;
+const TOOL_HIT_GAP = 18;
+
+const COMBAT_HIT_BUFFER = 22;
 
 
 // ============================================================
@@ -125,6 +121,85 @@ let nextColorIndex = 0;
 let listUpdateTimer = 0;
 
 let playerSequence = 0;
+
+let pairRebuildTimer = 0;
+
+const socket = io();
+
+socket.on("snapshot", (data) => {
+    // opcional: você pode limpar e reconstruir, mas o mais comum é só usar para UI
+    // Vou só atualizar o timer base se quiser (aqui deixo simples)
+});
+
+socket.on("playerUpdate", (p) => {
+    const existing = playerMap.get(String(p.userId));
+
+    if (!existing) {
+        // cria jogador novo
+        addPlayerToArena(p.name, p.avatar, p.coins, p.userId);
+
+        // se servidor já mandar como morto (pouco provável), elimina
+        const created = playerMap.get(String(p.userId));
+        if (created && p.alive === false) {
+            eliminatePlayer(created, null);
+        }
+
+        return;
+    }
+
+    // Atualiza dados SEM ressuscitar
+    existing.name = p.name;
+    existing.avatar = p.avatar;
+
+    if (existing.nameText) existing.nameText.setText(existing.name);
+    if (existing.avatarText) existing.avatarText.setText(existing.avatar);
+
+    if (!existing.alive) {
+        // morto não volta: ignora atualizações de coins
+        return;
+    }
+
+    // sincroniza moedas do servidor
+    existing.coins = p.coins;
+    existing.kills = p.kills;
+
+    existing.knifeCount = calculateKnifeCount(existing.coins);
+    existing.power = calculatePower(existing.knifeCount);
+    existing.hp = existing.maxHp;
+
+    updatePlayerVisuals(existing, 0);
+    updatePlayersList();
+    updatePlayerPreview();
+});
+
+socket.on("pairs", ({ pairs }) => {
+    // zera targets
+    for (const pl of players) {
+        if (!pl.alive) continue;
+        pl.targetId = null;
+        pl.aiTimer = 0;
+    }
+
+    // aplica pares
+    for (const [a, b] of pairs) {
+        const pa = playerMap.get(String(a));
+        const pb = playerMap.get(String(b));
+        if (!pa || !pb) continue;
+        if (!pa.alive || !pb.alive) continue;
+
+        pa.targetId = pb.userId;
+        pb.targetId = pa.userId;
+    }
+});
+
+socket.on("roundEnd", ({ winnerId }) => {
+    // encerra localmente também
+    checkWinner();
+});
+
+socket.on("info", (data) => {
+    if (data && data.message) setStatus(data.message);
+});
 
 
 // ============================================================
@@ -190,203 +265,171 @@ function getNextColor() {
 }
 
 
-function colorToHex(color) {
-
-    return (
-        "#" +
-        color
-            .toString(16)
-            .padStart(6, "0")
-    );
-
-}
-
-
 // ============================================================
 // UTILITÁRIOS
 // ============================================================
 
 function clamp(value, min, max) {
-
-    return Math.max(
-        min,
-        Math.min(max, value)
-    );
-
+    return Math.max(min, Math.min(max, value));
 }
 
-
-function distanceBetween(
-    x1,
-    y1,
-    x2,
-    y2
-) {
-
+function distanceBetween(x1, y1, x2, y2) {
     const dx = x2 - x1;
     const dy = y2 - y1;
-
-    return Math.sqrt(
-        dx * dx +
-        dy * dy
-    );
-
+    return Math.sqrt(dx * dx + dy * dy);
 }
-
 
 function normalizeVector(x, y) {
-
-    const length =
-        Math.sqrt(
-            x * x +
-            y * y
-        );
-
-    if (length < 0.0001) {
-
-        return {
-            x: 0,
-            y: 0
-        };
-
-    }
-
-    return {
-        x: x / length,
-        y: y / length
-    };
-
-}
-
-
-function normalizeAngle(angle) {
-
-    while (
-        angle > Math.PI
-    ) {
-
-        angle -=
-            Math.PI * 2;
-
-    }
-
-    while (
-        angle < -Math.PI
-    ) {
-
-        angle +=
-            Math.PI * 2;
-
-    }
-
-    return angle;
-
+    const length = Math.sqrt(x * x + y * y);
+    if (length < 0.0001) return { x: 0, y: 0 };
+    return { x: x / length, y: y / length };
 }
 
 
 // ============================================================
-// FACAS
+// FACAS / FORÇA
 // ============================================================
 
 function calculateKnifeCount(coins) {
-
-    return Math.floor(
-        Math.max(
-            0,
-            Number(coins) || 0
-        ) / 10
-    );
-
+    return Math.floor(Math.max(0, Number(coins) || 0) / 10);
 }
-
 
 function calculatePower(knifeCount) {
-
-    if (
-        knifeCount <= 0
-    ) {
-
-        return 0;
-
-    }
-
-    return (
-        5 +
-        Math.sqrt(
-            knifeCount
-        ) * 2
-    );
-
+    if (knifeCount <= 0) return 0;
+    return 5 + Math.sqrt(knifeCount) * 2;
 }
 
-
-// Distância do centro até a base da faca.
 function getOrbitRadius(player) {
-
     return (
         56 +
         Math.min(
             42,
-            Math.sqrt(
-                player.knifeCount
-            ) * 2.8
+            Math.sqrt(Math.max(0, player.knifeCount)) * 2.8
         )
     );
-
 }
 
-
-// Alcance total do centro do jogador
-// até a ponta da faca.
 function getPlayerWeaponReach(player) {
-
-    if (
-        !player ||
-        player.knifeCount <= 0
-    ) {
-
-        return 0;
-
-    }
-
-    return (
-        getOrbitRadius(player) +
-        KNIFE_LENGTH
-    );
-
+    if (!player || player.knifeCount <= 0) return 0;
+    return getOrbitRadius(player) + KNIFE_LENGTH;
 }
 
 
 // ============================================================
-// ESPAÇO OCUPADO PELO PLAYER
+// TAMANHO DO CORPO (cresce com facas)
 // ============================================================
-//
-// Fora de combate:
-//
-// corpo + órbita + comprimento da faca
-//
-// Isso faz com que dois jogadores não fiquem
-// simplesmente um por cima das facas do outro.
-//
-// Durante combate existe uma exceção:
-// eles podem aproximar as pontas das facas,
-// mas nunca os corpos.
-//
+
+function getBodyRadius(player) {
+    if (!player) return PLAYER_RADIUS_BASE;
+
+    const bonus =
+        Math.min(
+            PLAYER_RADIUS_BONUS_CAP,
+            Math.sqrt(Math.max(0, player.knifeCount)) * PLAYER_RADIUS_BONUS_SCALE
+        );
+
+    return PLAYER_RADIUS_BASE + bonus;
+}
+
+
+// ============================================================
+// VELOCIDADE (maior mais rápido)
+// ============================================================
+
+function getChaseSpeed(player) {
+    const bonus = Math.min(26, Math.sqrt(Math.max(0, player.knifeCount)) * 6);
+    return clamp(52 + bonus, 52, 88);
+}
+
+function getFleeSpeed(player) {
+    const bonus = Math.min(18, Math.sqrt(Math.max(0, player.knifeCount)) * 4);
+    return clamp(40 + bonus, 38, 72);
+}
+
+
+// ============================================================
+// ESPAÇO (corpo + alcance facas)
+// ============================================================
 
 function getPlayerSpaceRadius(player) {
+    if (!player || !player.alive) return getBodyRadius(player);
+    return getBodyRadius(player) + getPlayerWeaponReach(player) + PLAYER_SPACE_MARGIN;
+}
 
-    if (!player || !player.alive) {
 
-        return PLAYER_RADIUS;
+// ============================================================
+// COMBATE
+// ============================================================
 
+function isCombatPair(a, b) {
+    if (!a || !b || !a.alive || !b.alive) return false;
+    return (a.targetId === b.userId && b.targetId === a.userId);
+}
+
+
+// ============================================================
+// PAREAMENTO 1v1 POR RANKING
+// ============================================================
+
+function decideModeForPair(player, target) {
+    if (!player || !target) return "wander";
+
+    if (player.power !== target.power) {
+        return player.power > target.power ? "chase" : "flee";
     }
 
-    return (
-        PLAYER_RADIUS +
-        getPlayerWeaponReach(player) +
-        PLAYER_SPACE_MARGIN
-    );
+    if (player.coins !== target.coins) {
+        return player.coins > target.coins ? "chase" : "flee";
+    }
 
+    return player.sequence < target.sequence ? "chase" : "flee";
+}
+
+function hasValidPairTarget(player) {
+    if (!player || !player.alive) return false;
+
+    const target = player.targetId ? playerMap.get(player.targetId) : null;
+    if (!target || !target.alive) return false;
+
+    if (player.spawnProtectionMs > 0 || target.spawnProtectionMs > 0) return false;
+
+    return isCombatPair(player, target);
+}
+
+function rebuildCombatPairs() {
+    for (const p of players) {
+        if (!p.alive) continue;
+        p.targetId = null;
+        p.aiMode = "wander";
+        p.aiTimer = 0;
+    }
+
+    const eligible = players
+        .filter(p => p.alive && p.spawnProtectionMs <= 0)
+        .sort((a, b) => (b.coins - a.coins) || (b.power - a.power) || (a.sequence - b.sequence));
+
+    for (let i = 0; i < eligible.length - 1; i += 2) {
+        const a = eligible[i];
+        const b = eligible[i + 1];
+
+        a.targetId = b.userId;
+        b.targetId = a.userId;
+
+        a.aiMode = decideModeForPair(a, b);
+        b.aiMode = decideModeForPair(b, a);
+    }
+}
+
+function ensureCombatPairs(delta) {
+    pairRebuildTimer -= delta;
+
+    const eligible = players.filter(p => p.alive && p.spawnProtectionMs <= 0);
+    const invalidAssigned = eligible.some(p => p.targetId && !hasValidPairTarget(p));
+
+    if (pairRebuildTimer > 0 && !invalidAssigned) return;
+
+    pairRebuildTimer = PAIR_REBUILD_INTERVAL_MS;
+    rebuildCombatPairs();
 }
 
 
@@ -395,29 +438,15 @@ function getPlayerSpaceRadius(player) {
 // ============================================================
 
 const config = {
-
     type: Phaser.AUTO,
-
     width: WIDTH,
     height: HEIGHT,
-
     parent: "game-container",
-
-    backgroundColor:
-        "#111827",
-
-    scene: {
-
-        create: create,
-        update: update
-
-    }
-
+    backgroundColor: "#111827",
+    scene: { create, update }
 };
 
-
-const game =
-    new Phaser.Game(config);
+const game = new Phaser.Game(config);
 
 
 // ============================================================
@@ -425,152 +454,46 @@ const game =
 // ============================================================
 
 function create() {
-
     scene = this;
 
+    // Grade
+    const grid = scene.add.graphics();
+    grid.lineStyle(1, 0x222b3a, 0.5);
+    for (let x = 0; x < WIDTH; x += 50) grid.lineBetween(x, 0, x, HEIGHT);
+    for (let y = 0; y < HEIGHT; y += 50) grid.lineBetween(0, y, WIDTH, y);
 
-    // ========================================================
-    // GRADE
-    // ========================================================
+    // Borda
+    const border = scene.add.graphics();
+    border.lineStyle(4, 0x374151, 1);
+    border.strokeRect(8, 8, WIDTH - 16, HEIGHT - 16);
 
-    const grid =
-        scene.add.graphics();
+    // Armas
+    weaponGraphics = scene.add.graphics();
+    weaponGraphics.setDepth(20);
 
-    grid.lineStyle(
-        1,
-        0x222b3a,
-        0.5
-    );
-
-    for (
-        let x = 0;
-        x < WIDTH;
-        x += 50
-    ) {
-
-        grid.lineBetween(
-            x,
-            0,
-            x,
-            HEIGHT
-        );
-
-    }
-
-    for (
-        let y = 0;
-        y < HEIGHT;
-        y += 50
-    ) {
-
-        grid.lineBetween(
-            0,
-            y,
-            WIDTH,
-            y
-        );
-
-    }
-
-
-    // ========================================================
-    // BORDA
-    // ========================================================
-
-    const border =
-        scene.add.graphics();
-
-    border.lineStyle(
-        4,
-        0x374151,
-        1
-    );
-
-    border.strokeRect(
-        8,
-        8,
-        WIDTH - 16,
-        HEIGHT - 16
-    );
-
-
-    // ========================================================
-    // FACAS
-    // ========================================================
-
-    weaponGraphics =
-        scene.add.graphics();
-
-    weaponGraphics.setDepth(3);
-
-
-    // ========================================================
     // HUD
-    // ========================================================
+    playerCountText = scene.add.text(20, 15, "", { fontSize: "19px", color: "#ffffff", fontStyle: "bold" });
+    playerCountText.setDepth(200);
 
-    playerCountText =
-        scene.add.text(
-            20,
-            15,
-            "",
-            {
-                fontSize: "19px",
-                color: "#ffffff",
-                fontStyle: "bold"
-            }
-        );
+    roundText = scene.add.text(20, 42, "", { fontSize: "14px", color: "#9ca3af" });
+    roundText.setDepth(200);
 
+    roundTimerText = scene.add.text(WIDTH - 20, 18, "", { fontSize: "22px", color: "#ffffff", fontStyle: "bold" });
+    roundTimerText.setOrigin(1, 0);
+    roundTimerText.setDepth(200);
 
-    roundText =
-        scene.add.text(
-            20,
-            42,
-            "",
-            {
-                fontSize: "14px",
-                color: "#9ca3af"
-            }
-        );
-
-
-    roundTimerText =
-        scene.add.text(
-            WIDTH - 20,
-            18,
-            "",
-            {
-                fontSize: "22px",
-                color: "#ffffff",
-                fontStyle: "bold"
-            }
-        );
-
-    roundTimerText.setOrigin(
-        1,
-        0
-    );
-
-
-    battleText =
-        scene.add.text(
-            WIDTH / 2,
-            20,
-            "",
-            {
-                fontSize: "20px",
-                color: "#ffffff",
-                fontStyle: "bold"
-            }
-        );
-
+    battleText = scene.add.text(WIDTH / 2, 20, "", {
+        fontSize: "20px",
+        color: "#ffffff",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 4
+    });
     battleText.setOrigin(0.5);
-
+    battleText.setDepth(250);
 
     createWinnerOverlay();
-
-
     beginRound();
-
 }
 
 
@@ -579,139 +502,46 @@ function create() {
 // ============================================================
 
 function createWinnerOverlay() {
+    scene.winnerContainer = scene.add.container(WIDTH / 2, HEIGHT / 2);
+    scene.winnerContainer.setDepth(1000);
 
-    scene.winnerContainer =
-        scene.add.container(
-            WIDTH / 2,
-            HEIGHT / 2
-        );
+    const background = scene.add.rectangle(0, 0, WIDTH, HEIGHT, 0x000000, 0.86);
 
-    scene.winnerContainer.setDepth(100);
+    const winText = scene.add.text(0, -205, "WIN", {
+        fontSize: "115px",
+        color: "#ffffff",
+        fontStyle: "bold"
+    }).setOrigin(0.5);
 
+    const winnerAvatar = scene.add.text(0, -80, "😎", { fontSize: "68px" }).setOrigin(0.5);
 
-    const background =
-        scene.add.rectangle(
-            0,
-            0,
-            WIDTH,
-            HEIGHT,
-            0x000000,
-            0.86
-        );
+    const winnerName = scene.add.text(0, 5, "", {
+        fontSize: "46px",
+        color: "#ffffff",
+        fontStyle: "bold"
+    }).setOrigin(0.5);
 
+    const killsText = scene.add.text(0, 68, "", {
+        fontSize: "28px",
+        color: "#ffffff",
+        fontStyle: "bold"
+    }).setOrigin(0.5);
 
-    const winText =
-        scene.add.text(
-            0,
-            -205,
-            "WIN",
-            {
-                fontSize: "115px",
-                color: "#ffffff",
-                fontStyle: "bold"
-            }
-        );
+    const finalText = scene.add.text(0, 125, "RODADA FINALIZADA", {
+        fontSize: "18px",
+        color: "#9ca3af",
+        fontStyle: "bold"
+    }).setOrigin(0.5);
 
-    winText.setOrigin(0.5);
+    const instructionText = scene.add.text(0, 165, 'Clique em "Nova rodada"', {
+        fontSize: "14px",
+        color: "#6b7280"
+    }).setOrigin(0.5);
 
+    scene.winnerContainer.add([background, winText, winnerAvatar, winnerName, killsText, finalText, instructionText]);
+    scene.winnerContainer.setVisible(false);
 
-    const winnerAvatar =
-        scene.add.text(
-            0,
-            -80,
-            "😎",
-            {
-                fontSize: "68px"
-            }
-        );
-
-    winnerAvatar.setOrigin(0.5);
-
-
-    const winnerName =
-        scene.add.text(
-            0,
-            5,
-            "",
-            {
-                fontSize: "46px",
-                color: "#ffffff",
-                fontStyle: "bold"
-            }
-        );
-
-    winnerName.setOrigin(0.5);
-
-
-    const killsText =
-        scene.add.text(
-            0,
-            68,
-            "",
-            {
-                fontSize: "28px",
-                color: "#ffffff",
-                fontStyle: "bold"
-            }
-        );
-
-    killsText.setOrigin(0.5);
-
-
-    const finalText =
-        scene.add.text(
-            0,
-            125,
-            "RODADA FINALIZADA",
-            {
-                fontSize: "18px",
-                color: "#9ca3af",
-                fontStyle: "bold"
-            }
-        );
-
-    finalText.setOrigin(0.5);
-
-
-    const instructionText =
-        scene.add.text(
-            0,
-            165,
-            'Clique em "Nova rodada"',
-            {
-                fontSize: "14px",
-                color: "#6b7280"
-            }
-        );
-
-    instructionText.setOrigin(0.5);
-
-
-    scene.winnerContainer.add([
-        background,
-        winText,
-        winnerAvatar,
-        winnerName,
-        killsText,
-        finalText,
-        instructionText
-    ]);
-
-
-    scene.winnerContainer.setVisible(
-        false
-    );
-
-
-    scene.winnerData = {
-
-        winText,
-        winnerAvatar,
-        winnerName,
-        killsText
-
-    };
-
+    scene.winnerData = { winnerAvatar, winnerName, killsText };
 }
 
 
@@ -720,118 +550,50 @@ function createWinnerOverlay() {
 // ============================================================
 
 function beginRound() {
-
     clearCurrentRound();
 
     roundElapsedMs = 0;
-
     roundActive = true;
     roundEnded = false;
-
     battleMessageTimer = 0;
 
-    const button =
-        document.getElementById(
-            "new-round-button"
-        );
+    pairRebuildTimer = 0;
 
-    if (button) {
-
-        button.disabled = true;
-
-    }
-
+    const button = document.getElementById("new-round-button");
+    if (button) button.disabled = true;
 
     createInitialBots();
 
     updateRoundTimer();
     updatePlayersList();
     updatePlayerPreview();
-
 }
-
-
-// ============================================================
-// NOVA RODADA
-// ============================================================
 
 function startNewRound() {
-
-    if (roundActive) {
-
-        return;
-
-    }
-
+    if (roundActive) return;
     roundNumber++;
-
     beginRound();
-
-    setStatus(
-        "🔥 Nova rodada iniciada!"
-    );
-
+    setStatus("🔥 Nova rodada iniciada!");
 }
-
-
-// ============================================================
-// LIMPAR RODADA
-// ============================================================
 
 function clearCurrentRound() {
-
-    for (
-        const player of players
-    ) {
-
-        destroyPlayerVisuals(
-            player
-        );
-
-    }
-
+    for (const player of players) destroyPlayerVisuals(player);
 
     players = [];
-
     playerMap.clear();
-
     pendingPlayers.clear();
-
     spatialGrid.clear();
-
     nextColorIndex = 0;
-
     playerSequence = 0;
 
+    if (weaponGraphics) weaponGraphics.clear();
 
-    if (weaponGraphics) {
-
-        weaponGraphics.clear();
-
-    }
-
-
-    if (
-        scene &&
-        scene.winnerContainer
-    ) {
-
-        scene.winnerContainer
-            .setVisible(false);
-
-    }
-
+    if (scene && scene.winnerContainer) scene.winnerContainer.setVisible(false);
 }
 
-
-// ============================================================
-// DESTRUIR VISUAIS
-// ============================================================
-
 function destroyPlayerVisuals(player) {
-
     const visuals = [
-
+        player.body,
         player.aura,
         player.avatarText,
         player.nameText,
@@ -840,64 +602,23 @@ function destroyPlayerVisuals(player) {
         player.killText,
         player.hpBackground,
         player.hpBar
-
     ];
 
-    for (
-        const object of visuals
-    ) {
-
-        if (
-            object &&
-            object.destroy
-        ) {
-
-            object.destroy();
-
-        }
-
+    for (const object of visuals) {
+        if (object && object.destroy) object.destroy();
     }
-
 }
 
 
 // ============================================================
-// BOTS INICIAIS
+// BOTS (teste)
 // ============================================================
 
 function createInitialBots() {
-
-    addPlayerToArena(
-        "Sara",
-        "🧑",
-        50,
-        "bot-sara"
-    );
-
-
-    addPlayerToArena(
-        "Player2",
-        "😎",
-        100,
-        "bot-player2"
-    );
-
-
-    addPlayerToArena(
-        "Player3",
-        "👽",
-        250,
-        "bot-player3"
-    );
-
-
-    addPlayerToArena(
-        "Player4",
-        "🤖",
-        500,
-        "bot-player4"
-    );
-
+    addPlayerToArena("Sara", "🧑", 50, "bot-sara");
+    addPlayerToArena("Player2", "😎", 100, "bot-player2");
+    addPlayerToArena("Player3", "👽", 250, "bot-player3");
+    addPlayerToArena("Player4", "🤖", 500, "bot-player4");
 }
 
 
@@ -906,139 +627,42 @@ function createInitialBots() {
 // ============================================================
 
 function getGridKey(x, y) {
-
-    return (
-        Math.floor(
-            x / GRID_SIZE
-        ) +
-        ":" +
-        Math.floor(
-            y / GRID_SIZE
-        )
-    );
-
+    return Math.floor(x / GRID_SIZE) + ":" + Math.floor(y / GRID_SIZE);
 }
-
 
 function rebuildSpatialGrid() {
-
     spatialGrid.clear();
 
-    for (
-        const player of players
-    ) {
+    for (const player of players) {
+        if (!player.alive) continue;
 
-        if (!player.alive) {
+        const key = getGridKey(player.x, player.y);
 
-            continue;
-
-        }
-
-        const key =
-            getGridKey(
-                player.x,
-                player.y
-            );
-
-        if (
-            !spatialGrid.has(key)
-        ) {
-
-            spatialGrid.set(
-                key,
-                []
-            );
-
-        }
-
-        spatialGrid
-            .get(key)
-            .push(player);
-
+        if (!spatialGrid.has(key)) spatialGrid.set(key, []);
+        spatialGrid.get(key).push(player);
     }
-
 }
 
-
-function getPlayersNearPosition(
-    x,
-    y,
-    radius
-) {
-
-    const cellX =
-        Math.floor(
-            x / GRID_SIZE
-        );
-
-    const cellY =
-        Math.floor(
-            y / GRID_SIZE
-        );
-
-    const cellRadius =
-        Math.ceil(
-            radius / GRID_SIZE
-        );
+function getPlayersNearPosition(x, y, radius) {
+    const cellX = Math.floor(x / GRID_SIZE);
+    const cellY = Math.floor(y / GRID_SIZE);
+    const cellRadius = Math.ceil(radius / GRID_SIZE);
 
     const result = [];
 
+    for (let dx = -cellRadius; dx <= cellRadius; dx++) {
+        for (let dy = -cellRadius; dy <= cellRadius; dy++) {
+            const key = (cellX + dx) + ":" + (cellY + dy);
+            const cell = spatialGrid.get(key);
+            if (!cell) continue;
 
-    for (
-        let dx = -cellRadius;
-        dx <= cellRadius;
-        dx++
-    ) {
-
-        for (
-            let dy = -cellRadius;
-            dy <= cellRadius;
-            dy++
-        ) {
-
-            const key =
-                (
-                    cellX + dx
-                ) +
-                ":" +
-                (
-                    cellY + dy
-                );
-
-            const cell =
-                spatialGrid.get(key);
-
-            if (!cell) {
-
-                continue;
-
+            for (const player of cell) {
+                if (distanceBetween(x, y, player.x, player.y) <= radius) result.push(player);
             }
-
-            for (
-                const player of cell
-            ) {
-
-                if (
-                    distanceBetween(
-                        x,
-                        y,
-                        player.x,
-                        player.y
-                    ) <= radius
-                ) {
-
-                    result.push(player);
-
-                }
-
-            }
-
         }
-
     }
 
     return result;
-
 }
 
 
@@ -1047,274 +671,110 @@ function getPlayersNearPosition(
 // ============================================================
 
 function findSafeSpawnPosition() {
-
     rebuildSpatialGrid();
 
     let bestPosition = null;
     let bestDistance = -1;
 
+    for (let attempt = 0; attempt < SPAWN_ATTEMPTS; attempt++) {
+        const x = Phaser.Math.Between(120, WIDTH - 120);
+        const y = Phaser.Math.Between(120, HEIGHT - 120);
 
-    for (
-        let attempt = 0;
-        attempt < SPAWN_ATTEMPTS;
-        attempt++
-    ) {
+        let nearest = Infinity;
 
-        const x =
-            Phaser.Math.Between(
-                120,
-                WIDTH - 120
-            );
-
-        const y =
-            Phaser.Math.Between(
-                120,
-                HEIGHT - 120
-            );
-
-
-        let nearest =
-            Infinity;
-
-
-        for (
-            const player of players
-        ) {
-
-            if (!player.alive) {
-
-                continue;
-
-            }
-
-
-            const distance =
-                distanceBetween(
-                    x,
-                    y,
-                    player.x,
-                    player.y
-                );
-
-            nearest =
-                Math.min(
-                    nearest,
-                    distance
-                );
-
+        for (const player of players) {
+            if (!player.alive) continue;
+            const distance = distanceBetween(x, y, player.x, player.y);
+            nearest = Math.min(nearest, distance);
         }
 
+        if (nearest >= SPAWN_SAFE_DISTANCE) return { x, y };
 
-        if (
-            nearest >=
-            SPAWN_SAFE_DISTANCE
-        ) {
-
-            return {
-                x,
-                y
-            };
-
+        if (nearest > bestDistance) {
+            bestDistance = nearest;
+            bestPosition = { x, y };
         }
-
-
-        if (
-            nearest >
-            bestDistance
-        ) {
-
-            bestDistance =
-                nearest;
-
-            bestPosition = {
-                x,
-                y
-            };
-
-        }
-
     }
 
-
-    return (
-        bestPosition || {
-            x: WIDTH / 2,
-            y: HEIGHT / 2
-        }
-    );
-
+    return bestPosition || { x: WIDTH / 2, y: HEIGHT / 2 };
 }
 
 
 // ============================================================
-// CRIAR JOGADOR
+// CRIAR PLAYER
 // ============================================================
 
-function addPlayerToArena(
-    name,
-    avatar,
-    coins,
-    userId
-) {
+function addPlayerToArena(name, avatar, coins, userId) {
+    const normalizedId = String(userId);
 
-    const normalizedId =
-        String(userId);
+    const existing = playerMap.get(normalizedId);
 
-
-    const existing =
-        playerMap.get(
-            normalizedId
-        );
-
-
+    // Se já existe:
+    // - se vivo: soma moedas
+    // - se morto: NÃO ressuscita, ignora
     if (existing) {
-
-        if (
-            Number(coins) > 0
-        ) {
-
-            addCoinsToExistingPlayer(
-                existing,
-                Number(coins)
-            );
-
+        if (!existing.alive) {
+            showBattleMessage("⛔ " + existing.name + " já foi eliminado e não pode voltar.");
+            return existing;
         }
-
+        if (Number(coins) > 0) addCoinsToExistingPlayer(existing, Number(coins));
         return existing;
-
     }
 
+    const spawn = findSafeSpawnPosition();
 
-    const spawn =
-        findSafeSpawnPosition();
-
-
-    const safeCoins =
-        Math.max(
-            0,
-            Number(coins) || 0
-        );
-
-
-    const knifeCount =
-        calculateKnifeCount(
-            safeCoins
-        );
-
-
-    const color =
-        getNextColor();
-
-
-    const wanderAngle =
-        Math.random() *
-        Math.PI * 2;
-
+    const safeCoins = Math.max(0, Number(coins) || 0);
+    const knifeCount = calculateKnifeCount(safeCoins);
+    const color = getNextColor();
+    const angle = Math.random() * Math.PI * 2;
 
     const player = {
+        userId: normalizedId,
+        sequence: ++playerSequence,
 
-        userId:
-            normalizedId,
+        name: name || "Player",
+        avatar: avatar || "😎",
 
-        sequence:
-            ++playerSequence,
+        x: spawn.x,
+        y: spawn.y,
 
-        name:
-            name || "Player",
+        targetX: spawn.x,
+        targetY: spawn.y,
 
-        avatar:
-            avatar || "😎",
-
-        x:
-            spawn.x,
-
-        y:
-            spawn.y,
-
-        targetX:
-            spawn.x,
-
-        targetY:
-            spawn.y,
-
-        coins:
-            safeCoins,
-
+        coins: safeCoins,
         knifeCount,
-
-        power:
-            calculatePower(
-                knifeCount
-            ),
+        power: calculatePower(knifeCount),
 
         color,
 
         maxHp: 600,
-
         hp: 600,
 
         alive: true,
-
-        waiting: false,
-
         kills: 0,
 
         targetId: null,
-
         aiMode: "wander",
+        aiTimer: 0,
 
-        aiTimer: Phaser.Math.Between(
-            700,
-            1500
-        ),
+        wanderAngle: angle,
+        wanderTimer: Phaser.Math.Between(600, 1200),
 
-        moveTimer: 0,
+        fleeSide: Math.random() < 0.5 ? -1 : 1,
+        combatSide: Math.random() < 0.5 ? -1 : 1,
 
-        wanderAngle,
+        lastMoveDirX: Math.cos(angle),
+        lastMoveDirY: Math.sin(angle),
 
-        wanderTimer:
-            Phaser.Math.Between(
-                900,
-                2200
-            ),
-
-        fleeSide:
-            Math.random() < 0.5
-                ? -1
-                : 1,
-
-        behindSide:
-            Math.random() < 0.5
-                ? -1
-                : 1,
-
-        lastMoveDirX:
-            Math.cos(
-                wanderAngle
-            ),
-
-        lastMoveDirY:
-            Math.sin(
-                wanderAngle
-            ),
-
-        rotationAngle:
-            Math.random() *
-            Math.PI * 2,
-
-        rotationSpeed:
-            Phaser.Math.FloatBetween(
-                MIN_ROTATION_SPEED,
-                MAX_ROTATION_SPEED
-            ),
-
+        rotationAngle: Math.random() * Math.PI * 2,
+        rotationSpeed: Phaser.Math.FloatBetween(MIN_ROTATION_SPEED, MAX_ROTATION_SPEED),
         rotationTurns: 0,
 
-        spawnProtectionMs:
-            SPAWN_PROTECTION_MS,
-
+        spawnProtectionMs: SPAWN_PROTECTION_MS,
         recentHitMs: 0,
 
+        // VISUAIS
+        body: null,
         aura: null,
         avatarText: null,
         nameText: null,
@@ -1323,421 +783,112 @@ function addPlayerToArena(
         killText: null,
         hpBackground: null,
         hpBar: null
-
     };
 
+    const bodyRadius = getBodyRadius(player);
 
-    // ========================================================
-    // VISUAL
-    // ========================================================
+    // Corpo
+    player.body = scene.add.circle(player.x, player.y, bodyRadius, player.color, 0.95);
+    player.body.setStrokeStyle(3, 0xffffff, 0.9);
+    player.body.setDepth(4);
 
-    player.aura =
-        scene.add.circle(
-            player.x,
-            player.y,
-            PLAYER_RADIUS + 6,
-            player.color,
-            0.16
-        );
+    // Aura
+    player.aura = scene.add.circle(player.x, player.y, bodyRadius + 8, player.color, 0.14);
+    player.aura.setStrokeStyle(2, player.color, 0.4);
+    player.aura.setDepth(2);
 
-    player.aura.setDepth(1);
+    // Avatar
+    player.avatarText = scene.add.text(player.x, player.y, player.avatar, {
+        fontSize: "27px",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 2
+    });
+    player.avatarText.setOrigin(0.5);
+    player.avatarText.setDepth(8);
 
+    // Nome
+    player.nameText = scene.add.text(player.x, player.y - (bodyRadius + 16), player.name, {
+        fontSize: "14px",
+        color: "#ffffff",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 4
+    });
+    player.nameText.setOrigin(0.5);
+    player.nameText.setDepth(9);
 
-    player.avatarText =
-        scene.add.text(
-            player.x,
-            player.y,
-            player.avatar,
-            {
-                fontSize: "28px"
-            }
-        );
+    // Moedas
+    player.coinText = scene.add.text(player.x, player.y + (bodyRadius + 10), `🪙 ${player.coins}`, {
+        fontSize: "12px",
+        color: "#ffffff",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 3
+    });
+    player.coinText.setOrigin(0.5);
+    player.coinText.setDepth(9);
 
-    player.avatarText.setOrigin(
-        0.5
-    );
+    // Facas
+    player.knifeText = scene.add.text(player.x, player.y + (bodyRadius + 25), `🔪 ${player.knifeCount}`, {
+        fontSize: "11px",
+        color: "#ffffff",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 3
+    });
+    player.knifeText.setOrigin(0.5);
+    player.knifeText.setDepth(9);
 
-    player.avatarText.setDepth(5);
+    // Kills
+    player.killText = scene.add.text(player.x, player.y + (bodyRadius + 39), `💀 ${player.kills}`, {
+        fontSize: "10px",
+        color: "#fca5a5",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 3
+    });
+    player.killText.setOrigin(0.5);
+    player.killText.setDepth(9);
 
+    // HP
+    player.hpBackground = scene.add.rectangle(player.x, player.y + (bodyRadius + 53), 60, 5, 0x000000, 0.85);
+    player.hpBackground.setOrigin(0.5);
+    player.hpBackground.setDepth(9);
 
-    player.nameText =
-        scene.add.text(
-            player.x,
-            player.y - 43,
-            player.name,
-            {
-                fontSize: "14px",
-                color: "#ffffff",
-                fontStyle: "bold",
-                stroke: "#000000",
-                strokeThickness: 3
-            }
-        );
-
-    player.nameText.setOrigin(
-        0.5
-    );
-
-    player.nameText.setDepth(6);
-
-
-    player.coinText =
-        scene.add.text(
-            player.x,
-            player.y + 35,
-            `🪙 ${player.coins}`,
-            {
-                fontSize: "12px",
-                color: "#ffffff",
-                stroke: "#000000",
-                strokeThickness: 3
-            }
-        );
-
-    player.coinText.setOrigin(
-        0.5
-    );
-
-    player.coinText.setDepth(6);
-
-
-    player.knifeText =
-        scene.add.text(
-            player.x,
-            player.y + 50,
-            `🔪 ${player.knifeCount}`,
-            {
-                fontSize: "11px",
-                color: "#d1d5db",
-                stroke: "#000000",
-                strokeThickness: 2
-            }
-        );
-
-    player.knifeText.setOrigin(
-        0.5
-    );
-
-    player.knifeText.setDepth(6);
-
-
-    player.killText =
-        scene.add.text(
-            player.x,
-            player.y + 64,
-            `💀 ${player.kills}`,
-            {
-                fontSize: "10px",
-                color: "#fca5a5",
-                stroke: "#000000",
-                strokeThickness: 2
-            }
-        );
-
-    player.killText.setOrigin(
-        0.5
-    );
-
-    player.killText.setDepth(6);
-
-
-    player.hpBackground =
-        scene.add.rectangle(
-            player.x,
-            player.y + 78,
-            60,
-            5,
-            0x000000,
-            0.8
-        );
-
-    player.hpBackground.setOrigin(
-        0.5
-    );
-
-    player.hpBackground.setDepth(6);
-
-
-    player.hpBar =
-        scene.add.rectangle(
-            player.x - 30,
-            player.y + 78,
-            60,
-            5,
-            0x22c55e,
-            1
-        );
-
-    player.hpBar.setOrigin(
-        0,
-        0.5
-    );
-
-    player.hpBar.setDepth(7);
-
+    player.hpBar = scene.add.rectangle(player.x - 30, player.y + (bodyRadius + 53), 60, 5, 0x22c55e, 1);
+    player.hpBar.setOrigin(0, 0.5);
+    player.hpBar.setDepth(10);
 
     players.push(player);
+    playerMap.set(normalizedId, player);
 
-    playerMap.set(
-        normalizedId,
-        player
-    );
-
-
-    updatePlayerVisuals(
-        player,
-        0
-    );
-
+    updatePlayerVisuals(player, 0);
     updatePlayersList();
 
+    pairRebuildTimer = 0;
 
     return player;
-
 }
 
 
 // ============================================================
-// IA
+// IA (respeita pares)
 // ============================================================
 
-function getTargeters(target) {
-
-    let count = 0;
-
-    for (
-        const player of players
-    ) {
-
-        if (
-            !player.alive ||
-            player === target
-        ) {
-
-            continue;
-
-        }
-
-        if (
-            player.targetId ===
-            target.userId
-        ) {
-
-            count++;
-
-        }
-
-    }
-
-    return count;
-
-}
-
-
-function chooseTarget(player) {
-
-    const opponents =
-        players.filter(
-            other =>
-                other !== player &&
-                other.alive &&
-                other.spawnProtectionMs <= 0
-        );
-
-
-    if (
-        opponents.length === 0
-    ) {
-
-        player.targetId = null;
-
-        return null;
-
-    }
-
-
-    let candidates =
-        opponents.filter(
-            target =>
-                player.power >=
-                target.power * 1.10
-        );
-
-
-    if (
-        candidates.length === 0
-    ) {
-
-        candidates =
-            opponents;
-
-    }
-
-
-    let best = null;
-    let bestScore = -Infinity;
-
-
-    for (
-        const target of candidates
-    ) {
-
-        const distance =
-            distanceBetween(
-                player.x,
-                player.y,
-                target.x,
-                target.y
-            );
-
-
-        const targeters =
-            getTargeters(
-                target
-            );
-
-
-        let score = 0;
-
-
-        score +=
-            (
-                player.power -
-                target.power
-            ) * 10;
-
-
-        score -=
-            distance * 0.025;
-
-
-        score -=
-            targeters * 180;
-
-
-        if (
-            targeters >= 1 &&
-            player.power <
-            target.power * 2
-        ) {
-
-            score -= 500;
-
-        }
-
-
-        if (
-            score > bestScore
-        ) {
-
-            bestScore = score;
-            best = target;
-
-        }
-
-    }
-
-
-    if (best) {
-
-        player.targetId =
-            best.userId;
-
-    }
-
-
-    return best;
-
-}
-
-
-// ============================================================
-// MODO DA IA
-// ============================================================
-
-function updateAI(
-    player,
-    delta
-) {
-
-    if (!player.alive) {
-
-        return;
-
-    }
-
+function updateAI(player, delta) {
+    if (!player.alive) return;
 
     player.aiTimer -= delta;
 
-
-    const currentTarget =
-        player.targetId
-            ? playerMap.get(
-                player.targetId
-            )
-            : null;
-
-
-    const targetInvalid =
-        !currentTarget ||
-        !currentTarget.alive ||
-        currentTarget === player ||
-        currentTarget.spawnProtectionMs > 0;
-
-
-    if (
-        targetInvalid ||
-        player.aiTimer <= 0
-    ) {
-
-        chooseTarget(player);
-
-        player.aiTimer =
-            Phaser.Math.Between(
-                700,
-                1300
-            );
-
-    }
-
-
-    const target =
-        player.targetId
-            ? playerMap.get(
-                player.targetId
-            )
-            : null;
-
-
-    if (
-        !target ||
-        !target.alive
-    ) {
-
-        player.aiMode =
-            "wander";
-
+    if (hasValidPairTarget(player)) {
+        const target = playerMap.get(player.targetId);
+        player.aiMode = decideModeForPair(player, target);
         return;
-
     }
 
-
-    if (
-        player.power >=
-        target.power * 1.10
-    ) {
-
-        player.aiMode =
-            "chase";
-
-    }
-    else {
-
-        player.aiMode =
-            "flee";
-
-    }
-
+    player.aiMode = "wander";
+    player.targetId = null;
 }
 
 
@@ -1745,68 +896,12 @@ function updateAI(
 // WANDER
 // ============================================================
 
-function chooseWanderTarget(
-    player
-) {
+function chooseWanderTarget(player) {
+    const margin = BORDER_MARGIN + 30;
 
-    const margin =
-        BORDER_MARGIN + 20;
-
-
-    player.targetX =
-        Phaser.Math.Between(
-            margin,
-            WIDTH - margin
-        );
-
-
-    player.targetY =
-        Phaser.Math.Between(
-            margin,
-            HEIGHT - margin
-        );
-
-
-    player.wanderTimer =
-        Phaser.Math.Between(
-            1400,
-            3000
-        );
-
-}
-
-
-// ============================================================
-// DIREÇÃO
-// ============================================================
-
-function getMovementDirection(
-    player
-) {
-
-    const dir =
-        normalizeVector(
-            player.lastMoveDirX,
-            player.lastMoveDirY
-        );
-
-
-    if (
-        Math.abs(dir.x) +
-        Math.abs(dir.y) >
-        0.01
-    ) {
-
-        return dir;
-
-    }
-
-
-    return {
-        x: 1,
-        y: 0
-    };
-
+    player.targetX = Phaser.Math.Between(margin, WIDTH - margin);
+    player.targetY = Phaser.Math.Between(margin, HEIGHT - margin);
+    player.wanderTimer = Phaser.Math.Between(1000, 2000);
 }
 
 
@@ -1814,1548 +909,426 @@ function getMovementDirection(
 // MOVIMENTO
 // ============================================================
 
-function movePlayer(
-    player,
-    delta
-) {
+function movePlayer(player, delta) {
+    if (!player.alive) return;
 
-    if (
-        !player.alive
-    ) {
-
-        return;
-
-    }
-
-
-    const dt =
-        Math.min(
-            delta,
-            50
-        ) / 1000;
-
+    const dt = Math.min(delta, 50) / 1000;
 
     let desiredX = 0;
     let desiredY = 0;
 
+    const target = player.targetId ? playerMap.get(player.targetId) : null;
 
-    const target =
-        player.targetId
-            ? playerMap.get(
-                player.targetId
-            )
-            : null;
-
-
-    // ========================================================
-    // WANDER
-    // ========================================================
-
-    if (
-        !target ||
-        !target.alive
-    ) {
-
-        player.wanderTimer -=
-            delta;
-
+    // Sem alvo => wander
+    if (!target || !target.alive) {
+        player.wanderTimer -= delta;
 
         if (
             player.wanderTimer <= 0 ||
-            distanceBetween(
-                player.x,
-                player.y,
-                player.targetX,
-                player.targetY
-            ) < 35
+            distanceBetween(player.x, player.y, player.targetX, player.targetY) < 35
         ) {
-
-            chooseWanderTarget(
-                player
-            );
-
+            chooseWanderTarget(player);
         }
 
-
-        const wander =
-            normalizeVector(
-                player.targetX -
-                player.x,
-                player.targetY -
-                player.y
-            );
-
-
-        desiredX =
-            wander.x;
-
-        desiredY =
-            wander.y;
-
+        const wander = normalizeVector(player.targetX - player.x, player.targetY - player.y);
+        desiredX = wander.x;
+        desiredY = wander.y;
     }
 
+    // Fuga
+    else if (player.aiMode === "flee") {
+        const dx = player.x - target.x;
+        const dy = player.y - target.y;
 
-    // ========================================================
-    // FRACO = FUGIR
-    // ========================================================
+        const distance = Math.sqrt(dx * dx + dy * dy);
 
-    else if (
-        player.aiMode ===
-        "flee"
-    ) {
+        const away = normalizeVector(dx, dy);
+        const toward = normalizeVector(-dx, -dy);
 
-        const away =
-            normalizeVector(
-                player.x -
-                target.x,
-                player.y -
-                target.y
-            );
+        if (distance >= RETURN_TO_BATTLE_DISTANCE) {
+            desiredX = toward.x;
+            desiredY = toward.y;
+        } else {
+            const side = player.fleeSide;
+            const tangentX = -away.y * side;
+            const tangentY = away.x * side;
 
-
-        const side = {
-            x:
-                -away.y *
-                player.fleeSide,
-
-            y:
-                away.x *
-                player.fleeSide
-        };
-
-
-        const flee =
-            normalizeVector(
-                away.x * 0.78 +
-                side.x * 0.32,
-
-                away.y * 0.78 +
-                side.y * 0.32
-            );
-
-
-        desiredX =
-            flee.x;
-
-        desiredY =
-            flee.y;
-
+            desiredX = away.x * 0.55 + tangentX * 0.65;
+            desiredY = away.y * 0.55 + tangentY * 0.65;
+        }
     }
 
-
-    // ========================================================
-    // FORTE = FICAR ATRÁS
-    // ========================================================
-
+    // Caça
     else {
+        const dx = target.x - player.x;
+        const dy = target.y - player.y;
 
-        const targetDir =
-            getMovementDirection(
-                target
-            );
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        const toTarget = normalizeVector(dx, dy);
 
+        if (distance > MAX_COMBAT_DISTANCE) {
+            desiredX = toTarget.x;
+            desiredY = toTarget.y;
+        } else if (distance > COMBAT_DISTANCE) {
+            desiredX = toTarget.x;
+            desiredY = toTarget.y;
+        } else {
+            const side = player.combatSide;
+            const tangentX = -toTarget.y * side;
+            const tangentY = toTarget.x * side;
 
-        const sideX =
-            -targetDir.y *
-            player.behindSide;
+            const forward = distance > MIN_COMBAT_DISTANCE ? 0.35 : -0.05;
 
-        const sideY =
-            targetDir.x *
-            player.behindSide;
-
-
-        const desiredTargetX =
-            target.x -
-            targetDir.x *
-            BEHIND_DISTANCE +
-            sideX *
-            BEHIND_SIDE_OFFSET;
-
-
-        const desiredTargetY =
-            target.y -
-            targetDir.y *
-            BEHIND_DISTANCE +
-            sideY *
-            BEHIND_SIDE_OFFSET;
-
-
-        const toBehind =
-            normalizeVector(
-                desiredTargetX -
-                player.x,
-
-                desiredTargetY -
-                player.y
-            );
-
-
-        const distanceToTarget =
-            distanceBetween(
-                player.x,
-                player.y,
-                target.x,
-                target.y
-            );
-
-
-        if (
-            Math.abs(
-                distanceToTarget -
-                BEHIND_DISTANCE
-            ) < 35
-        ) {
-
-            const follow =
-                normalizeVector(
-                    targetDir.x * 0.85 +
-                    sideX * 0.22,
-
-                    targetDir.y * 0.85 +
-                    sideY * 0.22
-                );
-
-
-            desiredX =
-                follow.x;
-
-            desiredY =
-                follow.y;
-
+            desiredX = toTarget.x * forward + tangentX * COMBAT_STRAFE_FORCE;
+            desiredY = toTarget.y * forward + tangentY * COMBAT_STRAFE_FORCE;
         }
-
-        else {
-
-            desiredX =
-                toBehind.x;
-
-            desiredY =
-                toBehind.y;
-
-        }
-
-
-        const relativeX =
-            player.x -
-            target.x;
-
-        const relativeY =
-            player.y -
-            target.y;
-
-
-        const frontness =
-            relativeX *
-            targetDir.x +
-            relativeY *
-            targetDir.y;
-
-
-        if (
-            frontness > 10 &&
-            distanceToTarget <
-            BEHIND_DISTANCE + 60
-        ) {
-
-            const around =
-                normalizeVector(
-                    sideX * 0.9 -
-                    targetDir.x * 0.15,
-
-                    sideY * 0.9 -
-                    targetDir.y * 0.15
-                );
-
-
-            desiredX =
-                around.x;
-
-            desiredY =
-                around.y;
-
-        }
-
     }
 
-
-    // ========================================================
-    // SEPARAÇÃO DURANTE MOVIMENTO
-    // ========================================================
-
-    const nearbyRadius =
-        Math.max(
-            MIN_PLAYER_DISTANCE + 35,
-            250
-        );
-
-
-    const nearby =
-        getPlayersNearPosition(
-            player.x,
-            player.y,
-            nearbyRadius
-        );
-
+    // Separação
+    const nearbyRadius = Math.max(280, getPlayerSpaceRadius(player) + 80);
+    const nearby = getPlayersNearPosition(player.x, player.y, nearbyRadius);
 
     let separationX = 0;
     let separationY = 0;
 
+    for (const other of nearby) {
+        if (other === player || !other.alive) continue;
 
-    for (
-        const other of nearby
-    ) {
+        const dx = player.x - other.x;
+        const dy = player.y - other.y;
 
-        if (
-            other === player ||
-            !other.alive
-        ) {
+        let distance = Math.sqrt(dx * dx + dy * dy);
+        if (distance < 0.001) continue;
 
-            continue;
+        const combat = isCombatPair(player, other);
 
+        const requiredDistance =
+            combat
+                ? (getBodyRadius(player) + getBodyRadius(other) + COMBAT_BODY_GAP)
+                : (getPlayerSpaceRadius(player) + getPlayerSpaceRadius(other));
+
+        if (distance < requiredDistance) {
+            const strength = (requiredDistance - distance) / requiredDistance;
+            const force = combat ? 0.35 : 1.0;
+
+            separationX += (dx / distance) * strength * force;
+            separationY += (dy / distance) * strength * force;
         }
-
-
-        const dx =
-            player.x -
-            other.x;
-
-        const dy =
-            player.y -
-            other.y;
-
-
-        const distance =
-            Math.sqrt(
-                dx * dx +
-                dy * dy
-            );
-
-
-        if (
-            distance < 0.001
-        ) {
-
-            continue;
-
-        }
-
-
-        const playerTargetingOther =
-            player.targetId ===
-            other.userId;
-
-
-        const otherTargetingPlayer =
-            other.targetId ===
-            player.userId;
-
-
-        const isCombatPair =
-            playerTargetingOther ||
-            otherTargetingPlayer;
-
-
-        let requiredDistance;
-
-
-        if (isCombatPair) {
-
-            // Durante uma luta:
-            // as facas podem chegar uma na outra,
-            // mas os corpos nunca se atravessam.
-            requiredDistance =
-                (
-                    PLAYER_RADIUS * 2
-                ) +
-                COMBAT_BODY_GAP;
-
-        }
-        else {
-
-            // Fora de combate:
-            // respeita o espaço completo das facas.
-            requiredDistance =
-                getPlayerSpaceRadius(
-                    player
-                ) +
-                getPlayerSpaceRadius(
-                    other
-                );
-
-        }
-
-
-        if (
-            distance <
-            requiredDistance
-        ) {
-
-            const strength =
-                (
-                    requiredDistance -
-                    distance
-                ) /
-                requiredDistance;
-
-
-            separationX +=
-                (
-                    dx / distance
-                ) *
-                strength;
-
-            separationY +=
-                (
-                    dy / distance
-                ) *
-                strength;
-
-        }
-
     }
 
+    desiredX += separationX * SEPARATION_FORCE;
+    desiredY += separationY * SEPARATION_FORCE;
 
-    desiredX +=
-        separationX *
-        SEPARATION_FORCE;
+    // Borda
+    const borderSpace = getBodyRadius(player) + 8;
 
+    if (player.x < borderSpace) desiredX += 2;
+    if (player.x > WIDTH - borderSpace) desiredX -= 2;
+    if (player.y < borderSpace) desiredY += 2;
+    if (player.y > HEIGHT - borderSpace) desiredY -= 2;
 
-    desiredY +=
-        separationY *
-        SEPARATION_FORCE;
+    // Movimento final
+    const movement = normalizeVector(desiredX, desiredY);
 
+    const speed =
+        player.aiMode === "chase"
+            ? getChaseSpeed(player)
+            : player.aiMode === "flee"
+                ? getFleeSpeed(player)
+                : Phaser.Math.Clamp(player.moveSpeed || MIN_MOVE_SPEED, MIN_MOVE_SPEED, MAX_MOVE_SPEED);
 
-    // ========================================================
-    // BORDA
-    // ========================================================
+    player.x += movement.x * speed * dt;
+    player.y += movement.y * speed * dt;
 
-    let borderX = 0;
-    let borderY = 0;
+    // Limites
+    const r = getBodyRadius(player);
 
-
-    const borderSpace =
-        Math.min(
-            BORDER_MARGIN,
-            getPlayerSpaceRadius(
-                player
-            )
-        );
-
-
-    if (
-        player.x <
-        borderSpace
-    ) {
-
-        borderX +=
-            (
-                borderSpace -
-                player.x
-            ) /
-            borderSpace;
-
-    }
-
-
-    if (
-        player.x >
-        WIDTH -
-        borderSpace
-    ) {
-
-        borderX -=
-            (
-                player.x -
-                (
-                    WIDTH -
-                    borderSpace
-                )
-            ) /
-            borderSpace;
-
-    }
-
-
-    if (
-        player.y <
-        borderSpace
-    ) {
-
-        borderY +=
-            (
-                borderSpace -
-                player.y
-            ) /
-            borderSpace;
-
-    }
-
-
-    if (
-        player.y >
-        HEIGHT -
-        borderSpace
-    ) {
-
-        borderY -=
-            (
-                player.y -
-                (
-                    HEIGHT -
-                    borderSpace
-                )
-            ) /
-            borderSpace;
-
-    }
-
-
-    desiredX +=
-        borderX * 2.2;
-
-
-    desiredY +=
-        borderY * 2.2;
-
-
-    const movement =
-        normalizeVector(
-            desiredX,
-            desiredY
-        );
-
-
-    let speed =
-        Phaser.Math.Clamp(
-            player.moveSpeed ||
-            MIN_MOVE_SPEED,
-            MIN_MOVE_SPEED,
-            MAX_MOVE_SPEED
-        );
-
-
-    if (
-        player.aiMode ===
-        "flee"
-    ) {
-
-        speed =
-            FLEE_SPEED;
-
-    }
-    else if (
-        player.aiMode ===
-        "chase"
-    ) {
-
-        speed =
-            CHASE_SPEED;
-
-    }
-
-
-    player.x +=
-        movement.x *
-        speed *
-        dt;
-
-
-    player.y +=
-        movement.y *
-        speed *
-        dt;
-
-
-    if (
-        Math.abs(movement.x) +
-        Math.abs(movement.y) >
-        0.05
-    ) {
-
-        player.lastMoveDirX =
-            movement.x;
-
-        player.lastMoveDirY =
-            movement.y;
-
-    }
-
-
-    // ========================================================
-    // LIMITES
-    // ========================================================
-
-    player.x =
-        Phaser.Math.Clamp(
-            player.x,
-            PLAYER_RADIUS + 5,
-            WIDTH -
-            PLAYER_RADIUS -
-            5
-        );
-
-
-    player.y =
-        Phaser.Math.Clamp(
-            player.y,
-            PLAYER_RADIUS + 5,
-            HEIGHT -
-            PLAYER_RADIUS -
-            5
-        );
-
+    player.x = Phaser.Math.Clamp(player.x, r + 5, WIDTH - r - 5);
+    player.y = Phaser.Math.Clamp(player.y, r + 5, HEIGHT - r - 5);
 }
 
 
 // ============================================================
-// RESOLVER SOBREPOSIÇÃO
+// RESOLVER SOBREPOSIÇÃO (corpo + facas)
 // ============================================================
 
 function resolveAllPlayerOverlaps() {
-
-    for (
-        let pass = 0;
-        pass < 3;
-        pass++
-    ) {
-
+    for (let pass = 0; pass < 2; pass++) {
         rebuildSpatialGrid();
 
+        for (const player of players) {
+            if (!player.alive) continue;
 
-        for (
-            const player of players
-        ) {
+            const nearby = getPlayersNearPosition(player.x, player.y, 320);
 
-            if (
-                !player.alive
-            ) {
+            for (const other of nearby) {
+                if (other === player || !other.alive) continue;
 
-                continue;
+                // evita empurrar duas vezes o mesmo par
+                if (player.sequence >= other.sequence) continue;
 
-            }
+                let dx = player.x - other.x;
+                let dy = player.y - other.y;
 
+                let distance = Math.sqrt(dx * dx + dy * dy);
 
-            const nearby =
-                getPlayersNearPosition(
-                    player.x,
-                    player.y,
-                    300
-                );
-
-
-            for (
-                const other of nearby
-            ) {
-
-                if (
-                    other === player ||
-                    !other.alive
-                ) {
-
-                    continue;
-
-                }
-
-
-                if (
-                    player.sequence >=
-                    other.sequence
-                ) {
-
-                    continue;
-
-                }
-
-
-                let dx =
-                    player.x -
-                    other.x;
-
-                let dy =
-                    player.y -
-                    other.y;
-
-
-                let distance =
-                    Math.sqrt(
-                        dx * dx +
-                        dy * dy
-                    );
-
-
-                if (
-                    distance < 0.001
-                ) {
-
-                    const angle =
-                        Math.random() *
-                        Math.PI *
-                        2;
-
-                    dx =
-                        Math.cos(angle);
-
-                    dy =
-                        Math.sin(angle);
-
+                if (distance < 0.001) {
+                    const angle = Math.random() * Math.PI * 2;
+                    dx = Math.cos(angle);
+                    dy = Math.sin(angle);
                     distance = 1;
-
                 }
 
+                const combat = isCombatPair(player, other);
 
-                const playerTargetingOther =
-                    player.targetId ===
-                    other.userId;
+                const requiredDistance =
+                    combat
+                        ? (getBodyRadius(player) + getBodyRadius(other) + COMBAT_BODY_GAP)
+                        : (getPlayerSpaceRadius(player) + getPlayerSpaceRadius(other));
 
+                if (distance < requiredDistance) {
+                    const overlap = requiredDistance - distance;
+                    const nx = dx / distance;
+                    const ny = dy / distance;
 
-                const otherTargetingPlayer =
-                    other.targetId ===
-                    player.userId;
+                    const push = combat ? overlap * 0.20 : overlap * 0.50;
 
+                    player.x += nx * push;
+                    player.y += ny * push;
 
-                const isCombatPair =
-                    playerTargetingOther ||
-                    otherTargetingPlayer;
+                    other.x -= nx * push;
+                    other.y -= ny * push;
 
+                    const r1 = getBodyRadius(player);
+                    const r2 = getBodyRadius(other);
 
-                let requiredDistance;
+                    player.x = Phaser.Math.Clamp(player.x, r1 + 5, WIDTH - r1 - 5);
+                    player.y = Phaser.Math.Clamp(player.y, r1 + 5, HEIGHT - r1 - 5);
 
-
-                if (isCombatPair) {
-
-                    // Em combate, permite que as facas
-                    // se alcancem, mas os corpos não.
-                    requiredDistance =
-                        (
-                            PLAYER_RADIUS * 2
-                        ) +
-                        COMBAT_BODY_GAP;
-
+                    other.x = Phaser.Math.Clamp(other.x, r2 + 5, WIDTH - r2 - 5);
+                    other.y = Phaser.Math.Clamp(other.y, r2 + 5, HEIGHT - r2 - 5);
                 }
-                else {
-
-                    // Fora de combate, respeita
-                    // o espaço total das facas.
-                    requiredDistance =
-                        getPlayerSpaceRadius(
-                            player
-                        ) +
-                        getPlayerSpaceRadius(
-                            other
-                        );
-
-                }
-
-
-                if (
-                    distance <
-                    requiredDistance
-                ) {
-
-                    const overlap =
-                        requiredDistance -
-                        distance;
-
-
-                    const nx =
-                        dx / distance;
-
-                    const ny =
-                        dy / distance;
-
-
-                    const push =
-                        overlap * 0.5;
-
-
-                    player.x +=
-                        nx * push;
-
-                    player.y +=
-                        ny * push;
-
-
-                    other.x -=
-                        nx * push;
-
-                    other.y -=
-                        ny * push;
-
-
-                    player.x =
-                        Phaser.Math.Clamp(
-                            player.x,
-                            PLAYER_RADIUS + 5,
-                            WIDTH -
-                            PLAYER_RADIUS -
-                            5
-                        );
-
-
-                    player.y =
-                        Phaser.Math.Clamp(
-                            player.y,
-                            PLAYER_RADIUS + 5,
-                            HEIGHT -
-                            PLAYER_RADIUS -
-                            5
-                        );
-
-
-                    other.x =
-                        Phaser.Math.Clamp(
-                            other.x,
-                            PLAYER_RADIUS + 5,
-                            WIDTH -
-                            PLAYER_RADIUS -
-                            5
-                        );
-
-
-                    other.y =
-                        Phaser.Math.Clamp(
-                            other.y,
-                            PLAYER_RADIUS + 5,
-                            HEIGHT -
-                            PLAYER_RADIUS -
-                            5
-                        );
-
-                }
-
             }
-
         }
-
     }
-
 }
 
 
 // ============================================================
-// ROTAÇÃO DAS FACAS
+// ROTAÇÃO / ATAQUE
 // ============================================================
 
-function updateRotation(
-    player,
-    delta
-) {
+function updateRotation(player, delta) {
+    if (!player.alive || player.knifeCount <= 0) return;
 
-    if (
-        !player.alive ||
-        player.knifeCount <= 0
-    ) {
+    player.rotationAngle += player.rotationSpeed * (delta / 16.6667);
 
-        return;
-
-    }
-
-
-    player.rotationAngle +=
-        player.rotationSpeed *
-        (
-            delta /
-            16.6667
-        );
-
-
-    // Pode acontecer de o frame ser grande.
-    while (
-        player.rotationAngle >=
-        Math.PI * 2
-    ) {
-
-        player.rotationAngle -=
-            Math.PI * 2;
-
+    while (player.rotationAngle >= Math.PI * 2) {
+        player.rotationAngle -= Math.PI * 2;
         player.rotationTurns++;
-
     }
 
-
-    // ========================================================
-    // EXATAMENTE 3 ROTAÇÕES = -10 MOEDAS
-    // ========================================================
-
-    if (
-        player.rotationTurns >=
-        ROTATIONS_PER_COIN_DAMAGE
-    ) {
-
-        tryAttack(
-            player
-        );
-
-        // IMPORTANTE:
-        // sempre zera depois da terceira volta.
-        //
-        // Não fica:
-        // 3 -> 2 -> 2 -> 2
-        //
-        // Agora:
-        // 0 -> 1 -> 2 -> 3 -> ATAQUE -> 0
+    if (player.rotationTurns >= ROTATIONS_PER_COIN_DAMAGE) {
+        tryAttack(player);
         player.rotationTurns = 0;
-
     }
-
 }
 
 
 // ============================================================
-// CALCULAR PONTOS DA FACA
+// FACAS (geometria)
 // ============================================================
 
-function getKnifePoints(
-    player,
-    index
-) {
+function getKnifePoints(player, index) {
+    if (!player || player.knifeCount <= 0) return null;
 
-    if (
-        !player ||
-        player.knifeCount <= 0
-    ) {
+    const count = Math.min(player.knifeCount, MAX_VISUAL_KNIVES);
+    const spacing = Math.PI * 2 / count;
 
-        return null;
+    const angle = player.rotationAngle + spacing * index;
+    const orbit = getOrbitRadius(player);
 
-    }
+    const baseX = player.x + Math.cos(angle) * orbit;
+    const baseY = player.y + Math.sin(angle) * orbit;
 
+    const tipX = baseX + Math.cos(angle) * KNIFE_LENGTH;
+    const tipY = baseY + Math.sin(angle) * KNIFE_LENGTH;
 
-    const count =
-        Math.min(
-            player.knifeCount,
-            MAX_VISUAL_KNIVES
-        );
-
-
-    if (count <= 0) {
-
-        return null;
-
-    }
-
-
-    const spacing =
-        Math.PI * 2 /
-        count;
-
-
-    const angle =
-        player.rotationAngle +
-        spacing * index;
-
-
-    const baseX =
-        player.x +
-        Math.cos(angle) *
-        getOrbitRadius(player);
-
-
-    const baseY =
-        player.y +
-        Math.sin(angle) *
-        getOrbitRadius(player);
-
-
-    const tipX =
-        baseX +
-        Math.cos(angle) *
-        KNIFE_LENGTH;
-
-
-    const tipY =
-        baseY +
-        Math.sin(angle) *
-        KNIFE_LENGTH;
-
-
-    return {
-
-        baseX,
-        baseY,
-        tipX,
-        tipY,
-        angle
-
-    };
-
+    return { baseX, baseY, tipX, tipY, angle };
 }
 
+function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
 
-// ============================================================
-// DISTÂNCIA ENTRE SEGMENTOS
-// ============================================================
+    const lengthSquared = dx * dx + dy * dy;
+    if (lengthSquared <= 0.000001) return distanceBetween(px, py, x1, y1);
 
-function pointToSegmentDistance(
-    px,
-    py,
-    x1,
-    y1,
-    x2,
-    y2
-) {
+    let t = ((px - x1) * dx + (py - y1) * dy) / lengthSquared;
+    t = clamp(t, 0, 1);
 
-    const dx =
-        x2 - x1;
+    const closestX = x1 + t * dx;
+    const closestY = y1 + t * dy;
 
-    const dy =
-        y2 - y1;
-
-
-    const lengthSquared =
-        dx * dx +
-        dy * dy;
-
-
-    if (
-        lengthSquared <=
-        0.000001
-    ) {
-
-        return distanceBetween(
-            px,
-            py,
-            x1,
-            y1
-        );
-
-    }
-
-
-    let t =
-        (
-            (px - x1) * dx +
-            (py - y1) * dy
-        ) /
-        lengthSquared;
-
-
-    t =
-        clamp(
-            t,
-            0,
-            1
-        );
-
-
-    const closestX =
-        x1 +
-        t * dx;
-
-
-    const closestY =
-        y1 +
-        t * dy;
-
-
-    return distanceBetween(
-        px,
-        py,
-        closestX,
-        closestY
-    );
-
+    return distanceBetween(px, py, closestX, closestY);
 }
 
-
-// ============================================================
-// COLISÃO ENTRE DUAS FACAS
-// ============================================================
-
-function knifeSegmentsTouch(
-    knifeA,
-    knifeB
-) {
+function knifeSegmentsTouch(knifeA, knifeB) {
+    if (!knifeA || !knifeB) return false;
 
     if (
-        !knifeA ||
-        !knifeB
-    ) {
-
-        return false;
-
-    }
-
-
-    const tolerance =
-        TOOL_HIT_GAP;
-
-
-    const aToB =
         pointToSegmentDistance(
-            knifeA.baseX,
-            knifeA.baseY,
-            knifeB.baseX,
-            knifeB.baseY,
-            knifeB.tipX,
-            knifeB.tipY
-        );
-
+            knifeA.tipX, knifeA.tipY,
+            knifeB.baseX, knifeB.baseY, knifeB.tipX, knifeB.tipY
+        ) <= TOOL_HIT_GAP
+    ) return true;
 
     if (
-        aToB <= tolerance
-    ) {
-
-        return true;
-
-    }
-
-
-    const aTipToB =
         pointToSegmentDistance(
-            knifeA.tipX,
-            knifeA.tipY,
-            knifeB.baseX,
-            knifeB.baseY,
-            knifeB.tipX,
-            knifeB.tipY
-        );
-
-
-    if (
-        aTipToB <= tolerance
-    ) {
-
-        return true;
-
-    }
-
-
-    const bToA =
-        pointToSegmentDistance(
-            knifeB.baseX,
-            knifeB.baseY,
-            knifeA.baseX,
-            knifeA.baseY,
-            knifeA.tipX,
-            knifeA.tipY
-        );
-
-
-    if (
-        bToA <= tolerance
-    ) {
-
-        return true;
-
-    }
-
-
-    const bTipToA =
-        pointToSegmentDistance(
-            knifeB.tipX,
-            knifeB.tipY,
-            knifeA.baseX,
-            knifeA.baseY,
-            knifeA.tipX,
-            knifeA.tipY
-        );
-
-
-    return (
-        bTipToA <= tolerance
-    );
-
-}
-
-
-// ============================================================
-// VERIFICAR SE AS FACAS PODEM ATINGIR
-// ============================================================
-
-function weaponsCanHit(
-    attacker,
-    target
-) {
-
-    if (
-        !attacker ||
-        !target ||
-        attacker.knifeCount <= 0 ||
-        target.knifeCount <= 0
-    ) {
-
-        return false;
-
-    }
-
-
-    const attackerCount =
-        Math.min(
-            attacker.knifeCount,
-            MAX_VISUAL_KNIVES
-        );
-
-
-    const targetCount =
-        Math.min(
-            target.knifeCount,
-            MAX_VISUAL_KNIVES
-        );
-
-
-    for (
-        let i = 0;
-        i < attackerCount;
-        i++
-    ) {
-
-        const attackerKnife =
-            getKnifePoints(
-                attacker,
-                i
-            );
-
-
-        if (!attackerKnife) {
-
-            continue;
-
-        }
-
-
-        for (
-            let j = 0;
-            j < targetCount;
-            j++
-        ) {
-
-            const targetKnife =
-                getKnifePoints(
-                    target,
-                    j
-                );
-
-
-            if (!targetKnife) {
-
-                continue;
-
-            }
-
-
-            if (
-                knifeSegmentsTouch(
-                    attackerKnife,
-                    targetKnife
-                )
-            ) {
-
-                return true;
-
-            }
-
-        }
-
-    }
-
+            knifeB.tipX, knifeB.tipY,
+            knifeA.baseX, knifeA.baseY, knifeA.tipX, knifeA.tipY
+        ) <= TOOL_HIT_GAP
+    ) return true;
 
     return false;
+}
 
+function weaponsCanHit(attacker, target) {
+    if (!attacker || !target || attacker.knifeCount <= 0 || target.knifeCount <= 0) return false;
+
+    const attackerCount = Math.min(attacker.knifeCount, MAX_VISUAL_KNIVES);
+    const targetCount = Math.min(target.knifeCount, MAX_VISUAL_KNIVES);
+
+    for (let i = 0; i < attackerCount; i++) {
+        const knifeA = getKnifePoints(attacker, i);
+
+        for (let j = 0; j < targetCount; j++) {
+            const knifeB = getKnifePoints(target, j);
+            if (knifeSegmentsTouch(knifeA, knifeB)) return true;
+        }
+    }
+
+    return false;
 }
 
 
 // ============================================================
-// ATAQUE
+// ATAQUE (TRANSFERÊNCIA DE MOEDAS) + SEM "pile-on"
 // ============================================================
 
 function tryAttack(player) {
+    if (!player.alive || player.knifeCount <= 0) return false;
 
-    if (
-        !player.alive ||
-        player.knifeCount <= 0
-    ) {
+    const target = player.targetId ? playerMap.get(player.targetId) : null;
+    if (!target || !target.alive) return false;
+    if (target.spawnProtectionMs > 0) return false;
 
-        return false;
+    // Só ataca se for o par 1v1
+    if (!isCombatPair(player, target)) return false;
 
+    // Somente o mais forte ataca
+    if (player.power <= target.power) return false;
+
+    const attackerReach = getPlayerWeaponReach(player);
+    const targetReach = getPlayerWeaponReach(target);
+
+    const distance = distanceBetween(player.x, player.y, target.x, target.y);
+
+    const maximumDistance =
+        attackerReach + targetReach + TOOL_HIT_GAP + COMBAT_HIT_BUFFER;
+
+    if (distance > maximumDistance) return false;
+
+    let weaponHit = weaponsCanHit(player, target);
+
+    // fallback de contato
+    if (!weaponHit && distance <= attackerReach + targetReach + 8) {
+        weaponHit = true;
     }
 
+    if (!weaponHit) return false;
 
-    const target =
-        player.targetId
-            ? playerMap.get(
-                player.targetId
-            )
-            : null;
+    // TRANSFERÊNCIA
+    const oldTargetCoins = target.coins;
+    const damage = Math.min(COINS_PER_ATTACK, target.coins);
+    if (damage <= 0) return false;
 
+    target.coins = Math.max(0, target.coins - damage);
+    player.coins += damage;
 
-    if (
-        !target ||
-        !target.alive
-    ) {
+    // recalcula ambos
+    target.knifeCount = calculateKnifeCount(target.coins);
+    target.power = calculatePower(target.knifeCount);
 
-        return false;
+    player.knifeCount = calculateKnifeCount(player.coins);
+    player.power = calculatePower(player.knifeCount);
 
-    }
+    target.hp = target.maxHp * (target.coins / Math.max(oldTargetCoins, 1));
+    target.hp = Math.max(0, target.hp);
 
+    player.hp = player.maxHp;
 
-    if (
-        target.spawnProtectionMs >
-        0
-    ) {
-
-        return false;
-
-    }
-
-
-    // ========================================================
-    // SOMENTE O MAIS FORTE PODE ATACAR
-    // ========================================================
-
-    if (
-        player.power <=
-        target.power
-    ) {
-
-        return false;
-
-    }
-
-
-    // ========================================================
-    // DISTÂNCIA MÁXIMA POSSÍVEL DAS ARMAS
-    // ========================================================
-
-    const attackerReach =
-        getPlayerWeaponReach(
-            player
-        );
-
-
-    const targetReach =
-        getPlayerWeaponReach(
-            target
-        );
-
-
-    const distance =
-        distanceBetween(
-            player.x,
-            player.y,
-            target.x,
-            target.y
-        );
-
-
-    const maximumWeaponDistance =
-        attackerReach +
-        targetReach +
-        TOOL_HIT_GAP;
-
-
-    if (
-        distance >
-        maximumWeaponDistance
-    ) {
-
-        return false;
-
-    }
-
-
-    // ========================================================
-    // CONFIRMA SE EXISTE CONTATO REAL ENTRE FACAS
-    // ========================================================
-
-    if (
-        !weaponsCanHit(
-            player,
-            target
-        )
-    ) {
-
-        return false;
-
-    }
-
-
-    // ========================================================
-    // -10 MOEDAS
-    // ========================================================
-
-    const oldCoins =
-        target.coins;
-
-
-    const damage =
-        Math.min(
-            COINS_PER_ATTACK,
-            target.coins
-        );
-
-
-    target.coins =
-        Math.max(
-            0,
-            target.coins -
-            damage
-        );
-
-
-    target.knifeCount =
-        calculateKnifeCount(
-            target.coins
-        );
-
-
-    target.power =
-        calculatePower(
-            target.knifeCount
-        );
-
-
-    // Mantém HP apenas como indicador visual.
-    target.hp =
-        target.maxHp *
-        (
-            target.coins /
-            Math.max(
-                oldCoins,
-                1
-            )
-        );
-
-
-    target.hp =
-        Math.max(
-            0,
-            target.hp
-        );
-
-
-    target.recentHitMs =
-        180;
-
-
-    // ========================================================
-    // EFEITO DE ACERTO
-    // ========================================================
-
-    if (
-        target.avatarText
-    ) {
-
-        target.avatarText.setScale(
-            1.15
-        );
-
-
-        scene.tweens.add({
-
-            targets:
-                target.avatarText,
-
-            scale: 1,
-
-            duration: 100
-
-        });
-
-    }
-
+    target.recentHitMs = 220;
 
     showBattleMessage(
-        "🔪 " +
-        player.name +
-        " acertou " +
-        target.name +
-        " (-" +
-        damage +
-        " 🪙)"
+        "🔪 " + player.name + " roubou " + target.name +
+        " (-" + damage + " 🪙 / +" + damage + " 🪙)"
     );
 
 
-    updatePlayerVisuals(
-        target,
-        0
-    );
+    socket.emit("attack", {
+        attackerId: player.userId,
+        targetId: target.userId
+    });
 
+
+
+    updatePlayerVisuals(target, 0);
+    updatePlayerVisuals(player, 0);
 
     updatePlayersList();
 
-
-    // ========================================================
-    // MORTE
-    // ========================================================
-
-    if (
-        target.coins <= 0
-    ) {
-
-        eliminatePlayer(
-            target,
-            player
-        );
-
-    }
-
+    if (target.coins <= 0) eliminatePlayer(target, player);
 
     return true;
-
 }
 
 
 // ============================================================
-// ELIMINAR
+// ELIMINAR (NÃO RESSUSCITA)
 // ============================================================
 
-function eliminatePlayer(
-    target,
-    attacker
-) {
-
-    if (
-        !target.alive
-    ) {
-
-        return;
-
-    }
-
+function eliminatePlayer(target, attacker) {
+    if (!target.alive) return;
 
     target.alive = false;
-
     target.hp = 0;
-
     target.targetId = null;
-
+    target.coins = 0;
+    target.knifeCount = 0;
+    target.power = 0;
 
     if (attacker) {
-
         attacker.kills++;
-
+        attacker.targetId = null;
+        attacker.aiTimer = 0;
     }
 
-
-    // Todos que estavam atacando o morto
-    // precisam procurar outro alvo.
-    for (
-        const player of players
-    ) {
-
-        if (
-            player.targetId ===
-            target.userId
-        ) {
-
+    for (const player of players) {
+        if (player.targetId === target.userId) {
             player.targetId = null;
-
             player.aiTimer = 0;
-
         }
-
     }
 
+    pairRebuildTimer = 0;
 
     showBattleMessage(
-        "💀 " +
-        target.name +
-        " foi eliminado!"
+        "💀 " + target.name + " foi eliminado por " + (attacker ? attacker.name : "ninguém") + "!"
     );
 
-
     const objects = [
-
+        target.body,
         target.aura,
         target.avatarText,
         target.nameText,
@@ -3364,42 +1337,21 @@ function eliminatePlayer(
         target.killText,
         target.hpBackground,
         target.hpBar
-
     ];
 
+    for (const object of objects) {
+        if (!object) continue;
 
-    for (
-        const object of objects
-    ) {
-
-        if (
-            object
-        ) {
-
-            scene.tweens.add({
-
-                targets:
-                    object,
-
-                alpha: 0,
-
-                duration: 300
-
-            });
-
-        }
-
+        scene.tweens.add({
+            targets: object,
+            alpha: 0,
+            scale: 0.2,
+            duration: 350
+        });
     }
 
-
     updatePlayersList();
-
-
-    setTimeout(
-        checkWinner,
-        50
-    );
-
+    setTimeout(checkWinner, 80);
 }
 
 
@@ -3408,346 +1360,116 @@ function eliminatePlayer(
 // ============================================================
 
 function drawAllWeapons() {
-
-    if (!weaponGraphics) {
-
-        return;
-
-    }
-
+    if (!weaponGraphics) return;
 
     weaponGraphics.clear();
 
+    for (const player of players) {
+        if (!player.alive || player.knifeCount <= 0) continue;
 
-    for (
-        const player of players
-    ) {
+        const count = Math.min(player.knifeCount, MAX_VISUAL_KNIVES);
 
-        if (
-            !player.alive ||
-            player.knifeCount <= 0
-        ) {
+        for (let i = 0; i < count; i++) {
+            const knife = getKnifePoints(player, i);
+            if (!knife) continue;
 
-            continue;
+            weaponGraphics.lineStyle(4, player.color, 1);
+            weaponGraphics.lineBetween(knife.baseX, knife.baseY, knife.tipX, knife.tipY);
 
-        }
+            const sideX = -Math.sin(knife.angle) * 5;
+            const sideY = Math.cos(knife.angle) * 5;
 
-
-        const count =
-            Math.min(
-                player.knifeCount,
-                MAX_VISUAL_KNIVES
-            );
-
-
-        for (
-            let i = 0;
-            i < count;
-            i++
-        ) {
-
-            const knife =
-                getKnifePoints(
-                    player,
-                    i
-                );
-
-
-            if (!knife) {
-
-                continue;
-
-            }
-
-
-            weaponGraphics.lineStyle(
-                3,
-                player.color,
-                1
-            );
-
-
-            weaponGraphics.lineBetween(
-                knife.baseX,
-                knife.baseY,
-                knife.tipX,
-                knife.tipY
-            );
-
-
-            const sideX =
-                -Math.sin(
-                    knife.angle
-                ) * 5;
-
-
-            const sideY =
-                Math.cos(
-                    knife.angle
-                ) * 5;
-
-
-            weaponGraphics.fillStyle(
-                player.color,
-                1
-            );
-
-
+            weaponGraphics.fillStyle(player.color, 1);
             weaponGraphics.beginPath();
-
-
-            weaponGraphics.moveTo(
-                knife.tipX,
-                knife.tipY
-            );
-
+            weaponGraphics.moveTo(knife.tipX, knife.tipY);
 
             weaponGraphics.lineTo(
-                knife.tipX -
-                Math.cos(
-                    knife.angle
-                ) * 9 +
-                sideX,
-
-                knife.tipY -
-                Math.sin(
-                    knife.angle
-                ) * 9 +
-                sideY
+                knife.tipX - Math.cos(knife.angle) * 9 + sideX,
+                knife.tipY - Math.sin(knife.angle) * 9 + sideY
             );
-
 
             weaponGraphics.lineTo(
-                knife.tipX -
-                Math.cos(
-                    knife.angle
-                ) * 9 -
-                sideX,
-
-                knife.tipY -
-                Math.sin(
-                    knife.angle
-                ) * 9 -
-                sideY
+                knife.tipX - Math.cos(knife.angle) * 9 - sideX,
+                knife.tipY - Math.sin(knife.angle) * 9 - sideY
             );
-
 
             weaponGraphics.closePath();
-
             weaponGraphics.fillPath();
-
         }
-
     }
-
 }
 
 
 // ============================================================
-// VISUAL DO PLAYER
+// VISUAL
 // ============================================================
 
-function updatePlayerVisuals(
-    player,
-    delta
-) {
+function updatePlayerVisuals(player, delta) {
+    if (!player) return;
 
-    if (!player) {
+    if (player.recentHitMs > 0) player.recentHitMs -= delta;
+    if (player.spawnProtectionMs > 0) player.spawnProtectionMs -= delta;
 
-        return;
+    const bodyRadius = getBodyRadius(player);
 
-    }
+    if (player.body) {
+        player.body.setPosition(player.x, player.y);
+        if (player.body.setRadius) player.body.setRadius(bodyRadius);
 
-
-    if (
-        player.recentHitMs > 0
-    ) {
-
-        player.recentHitMs -=
-            delta;
-
-    }
-
-
-    if (
-        player.spawnProtectionMs > 0
-    ) {
-
-        player.spawnProtectionMs -=
-            delta;
-
-    }
-
-
-    if (
-        player.aura
-    ) {
-
-        player.aura.setPosition(
-            player.x,
-            player.y
+        player.body.setFillStyle(
+            player.color,
+            player.spawnProtectionMs > 0 ? 0.75 : 0.95
         );
+    }
 
+    if (player.aura) {
+        player.aura.setPosition(player.x, player.y);
+        if (player.aura.setRadius) player.aura.setRadius(bodyRadius + 8);
 
         player.aura.setFillStyle(
             player.color,
-            player.spawnProtectionMs > 0
-                ? 0.30
-                : 0.16
+            player.spawnProtectionMs > 0 ? 0.30 : 0.14
         );
-
     }
 
+    if (player.avatarText) player.avatarText.setPosition(player.x, player.y);
 
-    if (
-        player.avatarText
-    ) {
-
-        player.avatarText.setPosition(
-            player.x,
-            player.y
-        );
-
+    if (player.nameText) {
+        player.nameText.setPosition(player.x, player.y - (bodyRadius + 16));
     }
 
-
-    if (
-        player.nameText
-    ) {
-
-        player.nameText.setPosition(
-            player.x,
-            player.y - 43
-        );
-
+    if (player.coinText) {
+        player.coinText.setPosition(player.x, player.y + (bodyRadius + 10));
+        player.coinText.setText(`🪙 ${player.coins}`);
     }
 
-
-    if (
-        player.coinText
-    ) {
-
-        player.coinText.setPosition(
-            player.x,
-            player.y + 35
-        );
-
-
-        player.coinText.setText(
-            `🪙 ${player.coins}`
-        );
-
+    if (player.knifeText) {
+        player.knifeText.setPosition(player.x, player.y + (bodyRadius + 25));
+        player.knifeText.setText(`🔪 ${player.knifeCount}`);
     }
 
-
-    if (
-        player.knifeText
-    ) {
-
-        player.knifeText.setPosition(
-            player.x,
-            player.y + 50
-        );
-
-
-        player.knifeText.setText(
-            `🔪 ${player.knifeCount}`
-        );
-
+    if (player.killText) {
+        player.killText.setPosition(player.x, player.y + (bodyRadius + 39));
+        player.killText.setText(`💀 ${player.kills}`);
     }
 
-
-    if (
-        player.killText
-    ) {
-
-        player.killText.setPosition(
-            player.x,
-            player.y + 64
-        );
-
-
-        player.killText.setText(
-            `💀 ${player.kills}`
-        );
-
-    }
-
-
-    updateHealthBar(
-        player
-    );
-
+    updateHealthBar(player, bodyRadius);
 }
 
+function updateHealthBar(player, bodyRadius) {
+    if (!player.hpBackground || !player.hpBar) return;
 
-// ============================================================
-// HP VISUAL
-// ============================================================
+    const y = player.y + (bodyRadius + 53);
 
-function updateHealthBar(player) {
+    player.hpBackground.setPosition(player.x, y);
+    player.hpBar.setPosition(player.x - 30, y);
 
-    if (
-        !player.hpBackground ||
-        !player.hpBar
-    ) {
+    const ratio = clamp(player.hp / player.maxHp, 0, 1);
+    player.hpBar.width = 60 * ratio;
 
-        return;
-
-    }
-
-
-    player.hpBackground.setPosition(
-        player.x,
-        player.y + 78
-    );
-
-
-    player.hpBar.setPosition(
-        player.x - 30,
-        player.y + 78
-    );
-
-
-    const ratio =
-        clamp(
-            player.hp /
-            player.maxHp,
-            0,
-            1
-        );
-
-
-    player.hpBar.width =
-        60 * ratio;
-
-
-    if (
-        ratio > 0.5
-    ) {
-
-        player.hpBar.setFillStyle(
-            0x22c55e
-        );
-
-    }
-    else if (
-        ratio > 0.25
-    ) {
-
-        player.hpBar.setFillStyle(
-            0xf59e0b
-        );
-
-    }
-    else {
-
-        player.hpBar.setFillStyle(
-            0xef4444
-        );
-
-    }
-
+    if (ratio > 0.5) player.hpBar.setFillStyle(0x22c55e);
+    else if (ratio > 0.25) player.hpBar.setFillStyle(0xf59e0b);
+    else player.hpBar.setFillStyle(0xef4444);
 }
 
 
@@ -3756,143 +1478,42 @@ function updateHealthBar(player) {
 // ============================================================
 
 function checkWinner() {
+    if (!roundActive) return;
 
-    if (!roundActive) {
+    const alive = players.filter(p => p.alive);
+    if (alive.length > 1) return;
 
-        return;
-
-    }
-
-
-    const alive =
-        players.filter(
-            player =>
-                player.alive
-        );
-
-
-    if (
-        alive.length > 1
-    ) {
-
-        return;
-
-    }
-
-
-    if (
-        alive.length === 1
-    ) {
-
-        showWinner(
-            alive[0]
-        );
-
-    }
-    else {
-
-        finishRound();
-
-    }
-
+    if (alive.length === 1) showWinner(alive[0]);
+    else finishRound();
 }
 
-
-// ============================================================
-// SHOW WINNER
-// ============================================================
-
-function showWinner(
-    winner
-) {
-
-    if (!winner) {
-
-        finishRound();
-
-        return;
-
-    }
-
+function showWinner(winner) {
+    if (!winner) { finishRound(); return; }
 
     roundActive = false;
     roundEnded = true;
 
+    const button = document.getElementById("new-round-button");
+    if (button) button.disabled = false;
 
-    const button =
-        document.getElementById(
-            "new-round-button"
-        );
-
-
-    if (button) {
-
-        button.disabled = false;
-
+    if (scene.winnerData) {
+        scene.winnerData.winnerAvatar.setText(winner.avatar);
+        scene.winnerData.winnerName.setText(winner.name);
+        scene.winnerData.killsText.setText(`💀 ${winner.kills} kills`);
     }
 
-
-    if (
-        scene.winnerData
-    ) {
-
-        scene.winnerData
-            .winnerAvatar
-            .setText(
-                winner.avatar
-            );
-
-
-        scene.winnerData
-            .winnerName
-            .setText(
-                winner.name
-            );
-
-
-        scene.winnerData
-            .killsText
-            .setText(
-                `💀 ${winner.kills} kills`
-            );
-
-    }
-
-
-    scene.winnerContainer
-        .setVisible(true);
-
-
+    scene.winnerContainer.setVisible(true);
     updateRoundTimer();
-
 }
-
-
-// ============================================================
-// FINISH ROUND
-// ============================================================
 
 function finishRound() {
-
     roundActive = false;
     roundEnded = true;
 
-
-    const button =
-        document.getElementById(
-            "new-round-button"
-        );
-
-
-    if (button) {
-
-        button.disabled = false;
-
-    }
-
+    const button = document.getElementById("new-round-button");
+    if (button) button.disabled = false;
 
     updateRoundTimer();
-
 }
 
 
@@ -3901,147 +1522,41 @@ function finishRound() {
 // ============================================================
 
 function updateRoundTimer() {
+    const remaining = Math.max(0, ROUND_DURATION_MS - roundElapsedMs);
+    const totalSeconds = Math.ceil(remaining / 1000);
 
-    const remaining =
-        Math.max(
-            0,
-            ROUND_DURATION_MS -
-            roundElapsedMs
-        );
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
 
-
-    const totalSeconds =
-        Math.ceil(
-            remaining / 1000
-        );
-
-
-    const minutes =
-        Math.floor(
-            totalSeconds / 60
-        );
-
-
-    const seconds =
-        totalSeconds % 60;
-
-
-    if (
-        roundTimerText
-    ) {
-
+    if (roundTimerText) {
         roundTimerText.setText(
             `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
         );
-
     }
 
+    if (roundText) roundText.setText(`Rodada ${roundNumber}`);
 
-    if (
-        roundText
-    ) {
+    const panelRound = document.getElementById("panel-round");
+    if (panelRound) panelRound.innerText = roundNumber;
 
-        roundText.setText(
-            `Rodada ${roundNumber}`
-        );
+    const participants = players.filter(p => p.alive).length;
+    const waiting = pendingPlayers.size;
 
-    }
+    const participantElement = document.getElementById("panel-participants");
+    if (participantElement) participantElement.innerText = participants;
 
+    const waitingElement = document.getElementById("panel-waiting");
+    if (waitingElement) waitingElement.innerText = waiting;
 
-    const participants =
-        players.filter(
-            player =>
-                player.alive
-        ).length;
-
-
-    const waiting =
-        pendingPlayers.size;
-
-
-    const participantElement =
-        document.getElementById(
-            "panel-participants"
-        );
-
-
-    if (
-        participantElement
-    ) {
-
-        participantElement.innerText =
-            participants;
-
-    }
-
-
-    const waitingElement =
-        document.getElementById(
-            "panel-waiting"
-        );
-
-
-    if (
-        waitingElement
-    ) {
-
-        waitingElement.innerText =
-            waiting;
-
-    }
-
-
-    if (
-        playerCountText
-    ) {
-
-        playerCountText.setText(
-            `👥 ${participants}`
-        );
-
-    }
-
+    if (playerCountText) playerCountText.setText(`👥 ${participants}`);
 }
 
-
-// ============================================================
-// FIM POR TEMPO
-// ============================================================
-
 function checkTimeWinner() {
+    const alive = players.filter(p => p.alive);
+    if (alive.length === 0) { finishRound(); return; }
 
-    const alive =
-        players.filter(
-            player =>
-                player.alive
-        );
-
-
-    if (
-        alive.length === 0
-    ) {
-
-        finishRound();
-
-        return;
-
-    }
-
-
-    alive.sort(
-        (
-            a,
-            b
-        ) =>
-            b.coins -
-            a.coins
-    );
-
-
-    showWinner(
-        alive[0]
-    );
-
+    alive.sort((a, b) => b.coins - a.coins);
+    showWinner(alive[0]);
 }
 
 
@@ -4049,227 +1564,90 @@ function checkTimeWinner() {
 // UPDATE
 // ============================================================
 
-function update(
-    time,
-    delta
-) {
-
-    if (
-        !roundActive
-    ) {
-
+function update(time, delta) {
+    if (!roundActive) {
         drawAllWeapons();
-
         return;
-
     }
 
+    delta = Math.min(delta, 50);
+    roundElapsedMs += delta;
 
-    delta =
-        Math.min(
-            delta,
-            50
-        );
-
-
-    roundElapsedMs +=
-        delta;
-
-
-    if (
-        roundElapsedMs >=
-        ROUND_DURATION_MS
-    ) {
-
+    if (roundElapsedMs >= ROUND_DURATION_MS) {
         checkTimeWinner();
-
         return;
-
     }
-
 
     rebuildSpatialGrid();
 
+    // pareamento 1v1
+    ensureCombatPairs(delta);
 
-    // ========================================================
-    // IA + MOVIMENTO
-    // ========================================================
+    // IA + movimento
+    for (const player of players) {
+        if (!player.alive) continue;
 
-    for (
-        const player of players
-    ) {
-
-        if (
-            !player.alive
-        ) {
-
-            continue;
-
-        }
-
-
-        updateAI(
-            player,
-            delta
-        );
-
-
-        movePlayer(
-            player,
-            delta
-        );
-
+        updateAI(player, delta);
+        movePlayer(player, delta);
     }
 
-
-    // ========================================================
-    // SEPARAÇÃO FINAL
-    // ========================================================
-
+    // separação
     resolveAllPlayerOverlaps();
 
+    // rotação + visuais
+    for (const player of players) {
+        if (!player.alive) continue;
 
-    // ========================================================
-    // ROTAÇÃO
-    // ========================================================
-
-    for (
-        const player of players
-    ) {
-
-        if (
-            !player.alive
-        ) {
-
-            continue;
-
-        }
-
-
-        updateRotation(
-            player,
-            delta
-        );
-
-
-        updatePlayerVisuals(
-            player,
-            delta
-        );
-
+        updateRotation(player, delta);
+        updatePlayerVisuals(player, delta);
     }
-
 
     drawAllWeapons();
 
+    // mensagem
+    if (battleMessageTimer > 0) battleMessageTimer -= delta;
+    else if (battleText) battleText.setText("");
 
-    // ========================================================
-    // MENSAGEM
-    // ========================================================
-
-    if (
-        battleMessageTimer > 0
-    ) {
-
-        battleMessageTimer -=
-            delta;
-
-    }
-    else {
-
-        battleText.setText(
-            ""
-        );
-
-    }
-
-
-    // ========================================================
-    // LISTA
-    // ========================================================
-
-    listUpdateTimer -=
-        delta;
-
-
-    if (
-        listUpdateTimer <= 0
-    ) {
-
+    // painel/lista
+    listUpdateTimer -= delta;
+    if (listUpdateTimer <= 0) {
         listUpdateTimer = 250;
-
         updatePlayersList();
         updatePlayerPreview();
         updateRoundTimer();
-
     }
-
 }
 
 
 // ============================================================
-// ADICIONAR MOEDAS
+// MOEDAS (NÃO RESSUSCITA)
 // ============================================================
 
-function addCoinsToExistingPlayer(
-    player,
-    amount
-) {
+function addCoinsToExistingPlayer(player, amount) {
+    const value = Math.max(0, Number(amount) || 0);
+    if (value <= 0) return;
 
-    const value =
-        Math.max(
-            0,
-            Number(amount) || 0
-        );
-
-
-    if (
-        value <= 0
-    ) {
-
+    // morto não volta
+    if (!player.alive) {
+        showBattleMessage("⛔ " + player.name + " já foi eliminado e não pode voltar.");
         return;
-
     }
 
+    player.coins += value;
 
-    player.coins +=
-        value;
+    player.knifeCount = calculateKnifeCount(player.coins);
+    player.power = calculatePower(player.knifeCount);
 
+    player.hp = player.maxHp;
 
-    player.knifeCount =
-        calculateKnifeCount(
-            player.coins
-        );
+    updatePlayerVisuals(player, 0);
 
-
-    player.power =
-        calculatePower(
-            player.knifeCount
-        );
-
-
-    player.hp =
-        player.maxHp;
-
-
-    updatePlayerVisuals(
-        player,
-        0
-    );
-
-
-    showBattleMessage(
-        "🎁 " +
-        player.name +
-        " recebeu +" +
-        value +
-        " moedas!"
-    );
-
+    showBattleMessage("🎁 " + player.name + " recebeu +" + value + " moedas!");
 
     updatePlayersList();
     updatePlayerPreview();
 
+    pairRebuildTimer = 0;
 }
 
 
@@ -4278,368 +1656,99 @@ function addCoinsToExistingPlayer(
 // ============================================================
 
 function sendCoins(amount) {
+    if (!roundActive) { setStatus("⏰ A rodada terminou."); return; }
 
-    if (
-        !roundActive
-    ) {
+    const nameElement = document.getElementById("username");
+    const userIdElement = document.getElementById("userid");
+    const avatarElement = document.getElementById("avatar");
 
-        setStatus(
-            "⏰ A rodada terminou."
-        );
+    const name = nameElement ? nameElement.value.trim() : "";
+    const userId = userIdElement ? userIdElement.value.trim() : "";
+    const avatar = avatarElement ? avatarElement.value.trim() : "😎";
 
-        return;
+    if (!name) { setStatus("⚠️ Digite o nome."); return; }
+    if (!userId) { setStatus("⚠️ Digite o ID."); return; }
 
-    }
+    const value = Math.max(0, Number(amount) || 0);
+    if (value <= 0) return;
 
+    const existing = socket.emit("gift", {
+        userId,
+        name,
+        avatar,
+        amount: value
+    });
 
-    const nameElement =
-        document.getElementById(
-            "username"
-        );
-
-
-    const userIdElement =
-        document.getElementById(
-            "userid"
-        );
-
-
-    const avatarElement =
-        document.getElementById(
-            "avatar"
-        );
-
-
-    const name =
-        nameElement
-            ? nameElement.value.trim()
-            : "";
-
-
-    const userId =
-        userIdElement
-            ? userIdElement.value.trim()
-            : "";
-
-
-    const avatar =
-        avatarElement
-            ? avatarElement.value.trim()
-            : "😎";
-
-
-    if (!name) {
-
-        setStatus(
-            "⚠️ Digite o nome."
-        );
-
-        return;
-
-    }
-
-
-    if (!userId) {
-
-        setStatus(
-            "⚠️ Digite o ID."
-        );
-
-        return;
-
-    }
-
-
-    const value =
-        Math.max(
-            0,
-            Number(amount) || 0
-        );
-
-
-    if (
-        value <= 0
-    ) {
-
-        return;
-
-    }
-
-
-    const existing =
-        playerMap.get(
-            String(userId)
-        );
+    setStatus("🎁 Enviado para o servidor: +" + value + " moedas");
 
 
     if (existing) {
+        existing.name = name;
+        existing.avatar = avatar || "😎";
 
-        existing.name =
-            name;
+        if (existing.nameText) existing.nameText.setText(existing.name);
+        if (existing.avatarText) existing.avatarText.setText(existing.avatar);
 
+        addCoinsToExistingPlayer(existing, value);
 
-        existing.avatar =
-            avatar || "😎";
-
-
-        if (
-            existing.nameText
-        ) {
-
-            existing.nameText.setText(
-                existing.name
-            );
-
-        }
-
-
-        if (
-            existing.avatarText
-        ) {
-
-            existing.avatarText.setText(
-                existing.avatar
-            );
-
-        }
-
-
-        addCoinsToExistingPlayer(
-            existing,
-            value
-        );
-
-
-        setStatus(
-            "🎁 " +
-            name +
-            " recebeu +" +
-            value +
-            " moedas!"
-        );
-
-
+        setStatus("🎁 " + name + " recebeu +" + value + " moedas!");
         return;
-
     }
 
+    const player = addPlayerToArena(name, avatar || "😎", value, userId);
 
-    const player =
-        addPlayerToArena(
-            name,
-            avatar || "😎",
-            value,
-            userId
-        );
+    pendingPlayers.delete(String(userId));
 
-
-    pendingPlayers.delete(
-        String(userId)
-    );
-
-
-    showBattleMessage(
-        "🔥 " +
-        player.name +
-        " entrou na arena!"
-    );
-
-
-    setStatus(
-        "🔥 " +
-        player.name +
-        " entrou! 🛡️ Proteção inicial."
-    );
-
+    showBattleMessage("🔥 " + player.name + " entrou na arena!");
+    setStatus("🔥 " + player.name + ' entrou! 🛡️ Proteção inicial.');
 
     updatePlayersList();
     updatePlayerPreview();
     updateRoundTimer();
 
+    pairRebuildTimer = 0;
+
+    socket.emit("gift", { userId, name, avatar, amount: value });
+
 }
 
 
 // ============================================================
-// HEART-ME
+// HEART
 // ============================================================
 
 function sendHeart() {
+    if (!roundActive) { setStatus("⏰ A rodada terminou."); return; }
 
-    if (
-        !roundActive
-    ) {
+    const nameElement = document.getElementById("username");
+    const userIdElement = document.getElementById("userid");
+    const avatarElement = document.getElementById("avatar");
 
-        setStatus(
-            "⏰ A rodada terminou."
-        );
+    const name = nameElement ? nameElement.value.trim() : "";
+    const userId = userIdElement ? userIdElement.value.trim() : "";
+    const avatar = avatarElement ? avatarElement.value.trim() : "❤️";
 
-        return;
+    if (!name) { setStatus("⚠️ Digite o nome."); return; }
+    if (!userId) { setStatus("⚠️ Digite o ID."); return; }
 
-    }
-
-
-    const nameElement =
-        document.getElementById(
-            "username"
-        );
-
-
-    const userIdElement =
-        document.getElementById(
-            "userid"
-        );
-
-
-    const avatarElement =
-        document.getElementById(
-            "avatar"
-        );
-
-
-    const name =
-        nameElement
-            ? nameElement.value.trim()
-            : "";
-
-
-    const userId =
-        userIdElement
-            ? userIdElement.value.trim()
-            : "";
-
-
-    const avatar =
-        avatarElement
-            ? avatarElement.value.trim()
-            : "❤️";
-
-
-    if (!name) {
-
-        setStatus(
-            "⚠️ Digite o nome."
-        );
-
-        return;
-
-    }
-
-
-    if (!userId) {
-
-        setStatus(
-            "⚠️ Digite o ID."
-        );
-
-        return;
-
-    }
-
-
-    const existing =
-        playerMap.get(
-            String(userId)
-        );
-
-
+    const existing = playerMap.get(String(userId));
     if (existing) {
-
-        setStatus(
-            "❤️ " +
-            name +
-            " já está na arena."
-        );
-
+        setStatus("❤️ " + name + " já está na arena.");
         return;
-
     }
 
+    const player = addPlayerToArena(name, avatar || "❤️", 10, userId);
 
-    const player =
-        addPlayerToArena(
-            name,
-            avatar || "❤️",
-            10,
-            userId
-        );
+    pendingPlayers.delete(String(userId));
 
-
-    pendingPlayers.delete(
-        String(userId)
-    );
-
-
-    showBattleMessage(
-        "❤️ " +
-        player.name +
-        " entrou na arena!"
-    );
-
-
-    setStatus(
-        "❤️ " +
-        name +
-        " entrou usando Heart-Me!"
-    );
-
+    showBattleMessage("❤️ " + player.name + " entrou na arena!");
+    setStatus("❤️ " + name + " entrou usando Heart-Me!");
 
     updatePlayersList();
     updatePlayerPreview();
     updateRoundTimer();
 
-}
-
-
-// ============================================================
-// FUNÇÃO COMPATÍVEL COM PENDENTES
-// ============================================================
-
-function enterPendingPlayer(
-    pending
-) {
-
-    if (!pending) {
-
-        return null;
-
-    }
-
-
-    const userId =
-        String(
-            pending.userId
-        );
-
-
-    const existing =
-        playerMap.get(
-            userId
-        );
-
-
-    if (existing) {
-
-        pendingPlayers.delete(
-            userId
-        );
-
-        return existing;
-
-    }
-
-
-    pendingPlayers.delete(
-        userId
-    );
-
-
-    return addPlayerToArena(
-        pending.name,
-        pending.avatar,
-        pending.coins,
-        userId
-    );
-
+    pairRebuildTimer = 0;
 }
 
 
@@ -4648,109 +1757,42 @@ function enterPendingPlayer(
 // ============================================================
 
 function updatePlayerPreview() {
+    const userIdElement = document.getElementById("userid");
+    const coinsElement = document.getElementById("preview-coins");
+    const knivesElement = document.getElementById("preview-knives");
+    const killsElement = document.getElementById("preview-kills");
 
-    const userIdElement =
-        document.getElementById(
-            "userid"
-        );
+    if (!coinsElement || !knivesElement || !killsElement) return;
 
-
-    const coinsElement =
-        document.getElementById(
-            "preview-coins"
-        );
-
-
-    const knivesElement =
-        document.getElementById(
-            "preview-knives"
-        );
-
-
-    const killsElement =
-        document.getElementById(
-            "preview-kills"
-        );
-
-
-    if (
-        !coinsElement ||
-        !knivesElement ||
-        !killsElement
-    ) {
-
-        return;
-
-    }
-
-
-    const userId =
-        userIdElement
-            ? userIdElement.value.trim()
-            : "";
-
+    const userId = userIdElement ? userIdElement.value.trim() : "";
 
     if (!userId) {
-
         coinsElement.innerText = "0";
         knivesElement.innerText = "0";
         killsElement.innerText = "0";
-
         return;
-
     }
 
-
-    const player =
-        playerMap.get(
-            String(userId)
-        );
-
+    const player = playerMap.get(String(userId));
 
     if (player) {
-
-        coinsElement.innerText =
-            player.coins;
-
-        knivesElement.innerText =
-            player.knifeCount;
-
-        killsElement.innerText =
-            player.kills;
-
+        coinsElement.innerText = player.coins;
+        knivesElement.innerText = player.knifeCount;
+        killsElement.innerText = player.kills;
         return;
-
     }
 
-
-    const pending =
-        pendingPlayers.get(
-            String(userId)
-        );
-
-
+    const pending = pendingPlayers.get(String(userId));
     if (pending) {
-
-        coinsElement.innerText =
-            pending.coins;
-
-        knivesElement.innerText =
-            calculateKnifeCount(
-                pending.coins
-            );
-
-        killsElement.innerText =
-            "0";
-
+        coinsElement.innerText = pending.coins;
+        knivesElement.innerText = calculateKnifeCount(pending.coins);
+        killsElement.innerText = "0";
         return;
-
     }
-
 
     coinsElement.innerText = "0";
     knivesElement.innerText = "0";
     killsElement.innerText = "0";
-
 }
 
 
@@ -4759,20 +1801,8 @@ function updatePlayerPreview() {
 // ============================================================
 
 function setStatus(message) {
-
-    const element =
-        document.getElementById(
-            "selected-status"
-        );
-
-
-    if (element) {
-
-        element.innerText =
-            message;
-
-    }
-
+    const element = document.getElementById("selected-status");
+    if (element) element.innerText = message;
 }
 
 
@@ -4781,288 +1811,76 @@ function setStatus(message) {
 // ============================================================
 
 function updatePlayersList() {
+    const container = document.getElementById("players-list");
+    if (!container) return;
 
-    const container =
-        document.getElementById(
-            "players-list"
-        );
-
-
-    if (!container) {
-
+    if (players.length === 0) {
+        container.innerHTML = '<div class="empty-list">Nenhum jogador ainda.</div>';
         return;
-
     }
 
+    const sorted = [...players].sort((a, b) => {
+        if (a.alive && !b.alive) return -1;
+        if (!a.alive && b.alive) return 1;
 
-    if (
-        players.length === 0
-    ) {
+        if (b.kills !== a.kills) return b.kills - a.kills;
+        return b.coins - a.coins;
+    });
 
-        container.innerHTML =
-            '<div class="empty-list">Nenhum jogador ainda.</div>';
-
-        return;
-
-    }
-
-
-    const sorted =
-        [...players].sort(
-            (
-                a,
-                b
-            ) => {
-
-                if (
-                    a.alive &&
-                    !b.alive
-                ) {
-
-                    return -1;
-
-                }
-
-
-                if (
-                    !a.alive &&
-                    b.alive
-                ) {
-
-                    return 1;
-
-                }
-
-
-                if (
-                    b.kills !==
-                    a.kills
-                ) {
-
-                    return (
-                        b.kills -
-                        a.kills
-                    );
-
-                }
-
-
-                return (
-                    b.coins -
-                    a.coins
-                );
-
-            }
-        );
-
-
-    const visible =
-        sorted.slice(
-            0,
-            MAX_LIST_ROWS
-        );
-
-
+    const visible = sorted.slice(0, MAX_LIST_ROWS);
     container.innerHTML = "";
 
+    for (const player of visible) {
+        const row = document.createElement("div");
+        row.className = "player-row";
+        if (!player.alive) row.classList.add("player-dead");
 
-    for (
-        const player of visible
-    ) {
+        const avatar = document.createElement("div");
+        avatar.className = "player-avatar";
+        avatar.innerText = player.avatar;
 
-        const row =
-            document.createElement(
-                "div"
-            );
+        const info = document.createElement("div");
+        info.className = "player-info";
 
+        const name = document.createElement("div");
+        name.className = "player-name";
+        name.innerText = player.alive ? player.name : "💀 " + player.name;
 
-        row.className =
-            "player-row";
-
-
-        if (
-            !player.alive
-        ) {
-
-            row.classList.add(
-                "player-dead"
-            );
-
-        }
-
-
-        const avatar =
-            document.createElement(
-                "div"
-            );
-
-
-        avatar.className =
-            "player-avatar";
-
-
-        avatar.innerText =
-            player.avatar;
-
-
-        const info =
-            document.createElement(
-                "div"
-            );
-
-
-        info.className =
-            "player-info";
-
-
-        const name =
-            document.createElement(
-                "div"
-            );
-
-
-        name.className =
-            "player-name";
-
-
-        name.innerText =
-            player.alive
-                ? player.name
-                : "💀 " +
-                  player.name;
-
-
-        const data =
-            document.createElement(
-                "div"
-            );
-
-
-        data.className =
-            "player-data";
-
-
+        const data = document.createElement("div");
+        data.className = "player-data";
         data.innerText =
-            "🪙 " +
-            player.coins +
-            " | 🔪 " +
-            player.knifeCount +
-            " | 💀 " +
-            player.kills +
-            " | ❤️ " +
-            Math.ceil(
-                player.hp
-            );
+            "🪙 " + player.coins +
+            " | 🔪 " + player.knifeCount +
+            " | 💀 " + player.kills +
+            " | ❤️ " + Math.ceil(player.hp);
 
+        info.appendChild(name);
+        info.appendChild(data);
 
-        info.appendChild(
-            name
-        );
+        row.appendChild(avatar);
+        row.appendChild(info);
 
+        row.addEventListener("click", function () {
+            const username = document.getElementById("username");
+            const userid = document.getElementById("userid");
+            const avatarInput = document.getElementById("avatar");
 
-        info.appendChild(
-            data
-        );
+            if (username) username.value = player.name;
+            if (userid) userid.value = player.userId;
+            if (avatarInput) avatarInput.value = player.avatar;
 
+            updatePlayerPreview();
+        });
 
-        row.appendChild(
-            avatar
-        );
-
-
-        row.appendChild(
-            info
-        );
-
-
-        row.addEventListener(
-            "click",
-            function() {
-
-                const username =
-                    document.getElementById(
-                        "username"
-                    );
-
-
-                const userid =
-                    document.getElementById(
-                        "userid"
-                    );
-
-
-                const avatarInput =
-                    document.getElementById(
-                        "avatar"
-                    );
-
-
-                if (username) {
-
-                    username.value =
-                        player.name;
-
-                }
-
-
-                if (userid) {
-
-                    userid.value =
-                        player.userId;
-
-                }
-
-
-                if (avatarInput) {
-
-                    avatarInput.value =
-                        player.avatar;
-
-                }
-
-
-                updatePlayerPreview();
-
-            }
-        );
-
-
-        container.appendChild(
-            row
-        );
-
+        container.appendChild(row);
     }
 
-
-    if (
-        players.length >
-        MAX_LIST_ROWS
-    ) {
-
-        const footer =
-            document.createElement(
-                "div"
-            );
-
-
-        footer.className =
-            "list-limit";
-
-
-        footer.innerText =
-            "Exibindo " +
-            MAX_LIST_ROWS +
-            " de " +
-            players.length +
-            " participantes.";
-
-
-        container.appendChild(
-            footer
-        );
-
+    if (players.length > MAX_LIST_ROWS) {
+        const footer = document.createElement("div");
+        footer.className = "list-limit";
+        footer.innerText = "Exibindo " + MAX_LIST_ROWS + " de " + players.length + " participantes.";
+        container.appendChild(footer);
     }
-
 }
 
 
@@ -5070,198 +1888,42 @@ function updatePlayersList() {
 // MENSAGEM
 // ============================================================
 
-function showBattleMessage(
-    message
-) {
+function showBattleMessage(message) {
+    if (!battleText) return;
 
-    if (!battleText) {
-
-        return;
-
-    }
-
-
-    battleText.setText(
-        message
-    );
-
-
-    battleMessageTimer =
-        1800;
-
+    battleText.setText(message);
+    battleMessageTimer = 1800;
 }
 
 
 // ============================================================
-// TESTE DO SIMULADOR
-// ============================================================
-//
-// Console:
-//
-// testAdd("Joao", "123", "😎", 10)
-//
+// TESTES / API GLOBAL
 // ============================================================
 
-window.testAdd =
-    function(
-        name,
-        userId,
-        avatar = "😎",
-        coins = 10
-    ) {
+window.testAdd = function (name, userId, avatar = "😎", coins = 10) {
+    const username = document.getElementById("username");
+    const userid = document.getElementById("userid");
+    const avatarInput = document.getElementById("avatar");
 
-        const username =
-            document.getElementById(
-                "username"
-            );
+    if (username) username.value = name;
+    if (userid) userid.value = String(userId);
+    if (avatarInput) avatarInput.value = avatar;
 
+    sendCoins(coins);
+};
 
-        const userid =
-            document.getElementById(
-                "userid"
-            );
-
-
-        const avatarInput =
-            document.getElementById(
-                "avatar"
-            );
-
-
-        if (username) {
-
-            username.value =
-                name;
-
-        }
-
-
-        if (userid) {
-
-            userid.value =
-                String(userId);
-
-        }
-
-
-        if (avatarInput) {
-
-            avatarInput.value =
-                avatar;
-
-        }
-
-
-        sendCoins(
-            coins
-        );
-
-    };
-
-
-// ============================================================
-// FUNÇÃO DE TESTE DIRETO
-// ============================================================
-
-window.addPendingPlayer =
-    function(
-        name,
-        userId,
-        avatar = "😎",
-        coins = 10
-    ) {
-
-        if (!roundActive) {
-
-            return null;
-
-        }
-
-
-        const player =
-            addPlayerToArena(
-                name,
-                avatar,
-                coins,
-                userId
-            );
-
-
-        pendingPlayers.delete(
-            String(userId)
-        );
-
-
-        updatePlayersList();
-        updatePlayerPreview();
-        updateRoundTimer();
-
-
-        return player;
-
-    };
-
-
-// ============================================================
-// API GLOBAL
-// ============================================================
-
-window.sendCoins =
-    sendCoins;
-
-window.sendHeart =
-    sendHeart;
-
-window.startNewRound =
-    startNewRound;
-
-window.beginRound =
-    beginRound;
-
-window.updatePlayerPreview =
-    updatePlayerPreview;
-
-
-// ============================================================
-// DEBUG
-// ============================================================
+window.sendCoins = sendCoins;
+window.sendHeart = sendHeart;
+window.startNewRound = startNewRound;
+window.beginRound = beginRound;
+window.updatePlayerPreview = updatePlayerPreview;
 
 window.KnifeBattle = {
-
-    get players() {
-
-        return players;
-
-    },
-
-
-    get playerMap() {
-
-        return playerMap;
-
-    },
-
-
-    get pendingPlayers() {
-
-        return pendingPlayers;
-
-    },
-
-
-    addPlayer:
-        addPlayerToArena,
-
-
-    attack:
-        tryAttack,
-
-
-    startRound:
-        beginRound,
-
-
-    newRound:
-        startNewRound
-
+    get players() { return players; },
+    get playerMap() { return playerMap; },
+    get pendingPlayers() { return pendingPlayers; },
+    addPlayer: addPlayerToArena,
+    attack: tryAttack,
+    startRound: beginRound,
+    newRound: startNewRound
 };
